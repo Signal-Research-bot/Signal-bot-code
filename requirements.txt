@@ -1,0 +1,14 @@
+colorama==0.4.6
+iniconfig==2.3.0
+jaraco.classes==3.4.0
+jaraco.context==6.1.2
+jaraco.functools==4.6.0
+keyring==25.7.0
+more-itertools==11.1.0
+packaging==26.2
+phonenumbers==9.0.34
+pluggy==1.6.0
+Pygments==2.20.0
+pytest==9.1.1
+pywin32-ctypes==0.2.3
+sqlcipher3-wheels==0.5.7
