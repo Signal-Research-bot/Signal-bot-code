@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# This file is committed FIRST, before any other file, and is load-bearing for
+# the project's privacy claim. See PRIVACY.md and .claude/skills/privacy-invariants.
+# .gitignore is NOT retroactive — anything committed before it lands stays in
+# history forever. Do not reorder the initial commits.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# --- Secrets and host-specific identity -------------------------------------
+.env
+.env.*
+!.env.example
+*.local
+var/
+roster.yml
+roster.yaml
+
+# --- Signal state: linked-device identity keys. Never commit, never bind-mount
+# into the repo tree. Lives in a Docker named volume; this is belt-and-braces.
+signal-cli-data/
+*.d/
+attachments/
+
+# --- Local message cache (plaintext-adjacent even when encrypted) ------------
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Historical import scratch (Phase 6) ------------------------------------
+import/
+export/
+*.backup
+
+# --- Python -----------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+
+# --- Node (Quartz build, if ever added) -------------------------------------
+node_modules/
+
+# --- Editors / OS -----------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs and run artifacts (may contain message content or host paths) -----
+*.log
+logs/
+quarantine/
+metrics.jsonl
+
+# --- Recorded API fixtures: allowed ONLY under tests/fixtures/, which must be
+# synthetic. Any recording captured from a real run belongs in var/.
+var/recordings/
