@@ -2,6 +2,12 @@
 # a named volume, every name is static, and anything that varies by machine
 # comes from .env (see .env.example).
 #
+# This lives at the repo ROOT, not in docker/, and that is deliberate. Compose
+# resolves .env relative to the compose file's own directory, so a compose file
+# under docker/ silently ignores the .env beside it at the root -- every
+# variable comes through empty with no warning. Keeping it here also means the
+# operator never types -f.
+#
 # Named volumes live inside the WSL2 VHDX on whichever drive Docker Desktop is
 # configured to use. Check that before first run: a Docker Desktop reinstall
 # can silently reset the disk image location back to C:.
@@ -31,7 +37,7 @@ x-logging: &logging
 services:
   signal-cli:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile.signal-cli
     container_name: srb-signal-cli
     restart: unless-stopped
@@ -52,7 +58,7 @@ services:
 
   worker:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile.worker
     container_name: srb-worker
     restart: unless-stopped
@@ -65,7 +71,10 @@ services:
     environment:
       SRB_SIGNAL_HOST: signal-cli
       SRB_SIGNAL_PORT: "7583"
-      SRB_GROUP_ID: ${SRB_GROUP_ID:?set SRB_GROUP_ID in .env}
+      SRB_GROUP_ID: ${SRB_GROUP_ID:-}   # deliberately NOT ${VAR:?...}: it is
+        # unknowable until after `--profile link`, and a required-var marker
+        # here blocks the build you need in order to link. config.py validates
+        # it at startup with a better message than compose can give.
       SRB_CACHE_KEY: ${SRB_CACHE_KEY:?set SRB_CACHE_KEY in .env}
       SRB_LOG_LEVEL: ${SRB_LOG_LEVEL:-INFO}
     logging: *logging
@@ -79,7 +88,7 @@ services:
   # one-time offer.
   link:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile.signal-cli
     profiles: ["link"]
     networks: [internal]
@@ -95,7 +104,7 @@ services:
   # idempotent so a late double-run is harmless.
   batch:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile.worker
     profiles: ["batch"]
     networks: [internal]
@@ -108,11 +117,11 @@ services:
       # roster.json, the pseudonym map, quarantine and metrics. Relative to the
       # compose file, so no host path appears here. Everything under it is
       # gitignored on the host.
-      - ../var:/app/var
+      - ./var:/app/var
     environment:
       SRB_SIGNAL_HOST: signal-cli
       SRB_SIGNAL_PORT: "7583"
-      SRB_GROUP_ID: ${SRB_GROUP_ID:?set SRB_GROUP_ID in .env}
+      SRB_GROUP_ID: ${SRB_GROUP_ID:-}
       SRB_CACHE_KEY: ${SRB_CACHE_KEY:?set SRB_CACHE_KEY in .env}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
       SRB_MAX_TASKS_PER_WINDOW: ${SRB_MAX_TASKS_PER_WINDOW:-4}

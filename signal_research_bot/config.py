@@ -31,6 +31,27 @@ def _require(name: str) -> str:
 # symptom into a config error naming the variable.
 MIN_GROUP_ID_LEN = 16
 
+# What this archive is ABOUT. Without it the pipeline researches whatever comes
+# up -- a restaurant recommendation scores as well as a securities question --
+# which is the fastest way to waste money and clutter the archive.
+#
+# Scoping here rather than asking members to phrase things a particular way is
+# deliberate: the interesting leads arrive in ordinary conversation, and any
+# rule that depends on eight people remembering a syntax will not hold.
+DEFAULT_DOMAIN = (
+    "Financial and corporate investigation of the Bitcoin and crypto sector. "
+    "In scope: ownership structures, related-party transactions, undisclosed "
+    "connections between companies and people; reserves, attestations, audits "
+    "and their absence; regulatory action, enforcement, litigation and "
+    "filings; entities tied to Cantor Fitzgerald, Tether, Bitfinex and their "
+    "affiliates, investors and counterparties; the funding and governance of "
+    "Bitcoin development; claims of corruption, conflicts of interest or "
+    "market manipulation anywhere in that sector. "
+    "Out of scope: price predictions, trading opinions, general crypto news "
+    "with no investigative angle, technical support, and anything unrelated "
+    "to the sector."
+)
+
 
 def _require_group_id() -> str:
     value = _require("SRB_GROUP_ID")
@@ -65,6 +86,7 @@ class Config:
     max_tasks_per_window: int
     worth_threshold: float
     notify: bool
+    research_domain: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -88,4 +110,5 @@ class Config:
             max_tasks_per_window=int(os.environ.get("SRB_MAX_TASKS_PER_WINDOW", "4")),
             worth_threshold=float(os.environ.get("SRB_WORTH_THRESHOLD", "0.6")),
             notify=os.environ.get("SRB_NOTIFY", "false").lower() in {"1", "true", "yes"},
+            research_domain=os.environ.get("SRB_RESEARCH_DOMAIN", DEFAULT_DOMAIN).strip(),
         )

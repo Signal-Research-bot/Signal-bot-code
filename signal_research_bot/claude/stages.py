@@ -24,26 +24,46 @@ from .client import HAIKU, OPUS, SONNET, search_request, structured_request
 # --- stage 1: extract ---------------------------------------------------------
 
 EXTRACT_SYSTEM = """\
-You read a pseudonymised group chat transcript and pull out questions worth \
-researching. Participants are labelled "Participant A" and so on; that is all \
-you know about them and all you need.
+You read a pseudonymised group chat transcript and surface RESEARCHABLE LEADS. \
+Participants are labelled "Participant A" and so on; that is all you know \
+about them and all you need.
 
-Extract a task only when answering it with sources would tell the group \
-something they do not already know. Restate every question NEUTRALLY: someone \
-asserting a thing confidently is not evidence the thing is true, and not \
-evidence it is contested. Strip rhetoric, sarcasm and hedging.
+Nobody is addressing you. This is ordinary conversation that happens to be \
+observed. Do not expect questions to be well formed, directed at you, or even \
+phrased as questions -- most of the best leads are not.
 
-Do not extract: matters of taste, jokes, plans to meet, questions already \
-answered in the transcript itself, or questions about the participants.
+A lead is anything CHECKABLE against sources. All four of these count:
 
-Return an empty list rather than manufacturing tasks. A quiet window is a \
-normal outcome and costs nothing."""
+1. An explicit question. "Is the Q1 attestation an actual audit?"
+2. An asserted claim stated as fact. "They quietly took a stake through a \
+subsidiary last year." Restate it as the question that would verify it.
+3. A named entity, filing, transaction or relationship raised in passing that \
+would repay investigation -- especially an undisclosed connection between two \
+parties.
+4. A disagreement where the participants clearly do not know the answer.
+
+Restate every lead NEUTRALLY as a checkable question. Someone asserting a \
+thing confidently is not evidence it is true, and not evidence it is \
+contested. Strip rhetoric, sarcasm, hedging and certainty alike.
+
+Do NOT surface: matters of taste, price predictions, trading opinions, jokes, \
+logistics, anything already settled inside the transcript itself, or anything \
+about the participants themselves.
+
+Return an empty list rather than manufacturing leads. A quiet window is a \
+normal, common and free outcome. Inventing work to look useful is the failure \
+mode to avoid."""
 
 
-def extract(transcript: str) -> dict[str, Any]:
+def extract(transcript: str, domain: str) -> dict[str, Any]:
     return structured_request(
         model=SONNET,
-        system=EXTRACT_SYSTEM,
+        system=(
+            f"{EXTRACT_SYSTEM}\n\n"
+            f"<archive_subject>\nThis archive is about the following, and "
+            f"nothing else. A lead outside it is not a lead, however "
+            f"interesting.\n\n{domain}\n</archive_subject>"
+        ),
         user=f"<transcript>\n{transcript}\n</transcript>",
         schema=schemas.EXTRACT,
         effort="low",
@@ -55,11 +75,17 @@ def extract(transcript: str) -> dict[str, Any]:
 
 TRIAGE_SYSTEM = """\
 You are the gate in front of an expensive research stage. Score each candidate \
-question so that only the ones worth paying for continue.
+lead so that only the ones worth paying for continue.
 
-`worth` is 0 to 1: how much would a properly sourced answer improve a shared \
-research archive? Banter, taste, and anything already settled score near 0. A \
-question whose answer would change what the group believes or does scores high.
+FIRST, judge scope. `in_scope` is false for anything outside the archive's \
+subject, however interesting it is in its own right. An out-of-scope lead is \
+dropped before it costs anything, so be decisive rather than generous. When a \
+lead is only tangentially connected, it is out of scope.
+
+`worth` is 0 to 1, and only meaningful for in-scope leads: how much would a \
+properly sourced answer improve this archive? A lead that would change what \
+the group believes about who owns what, who is connected to whom, or what a \
+filing actually says scores high. Restating public knowledge scores low.
 
 `difficulty` estimates what it takes to answer well. Mark `high` when the \
 answer needs primary documents, or when you expect sources to disagree -- that \
@@ -72,14 +98,18 @@ Be strict. Dropping a weak question costs nothing; researching one costs real \
 money and clutters the archive."""
 
 
-def triage(candidates: list[dict], kb_digest: str) -> dict[str, Any]:
+def triage(candidates: list[dict], kb_digest: str, domain: str) -> dict[str, Any]:
     # The digest is the cacheable prefix. Caching only pays above the model's
     # minimum cacheable prefix (1024 tokens on Sonnet 5); below that this
     # silently does nothing, so it is enabled only when the digest is large.
     cache = len(kb_digest) > 4000
     return structured_request(
         model=SONNET,
-        system=f"{TRIAGE_SYSTEM}\n\n<existing_archive>\n{kb_digest}\n</existing_archive>",
+        system=(
+            f"{TRIAGE_SYSTEM}\n\n"
+            f"<archive_subject>\n{domain}\n</archive_subject>\n\n"
+            f"<existing_archive>\n{kb_digest}\n</existing_archive>"
+        ),
         user="<candidates>\n"
         + "\n".join(f"- {c['question']} (context: {c['context']})" for c in candidates)
         + "\n</candidates>",

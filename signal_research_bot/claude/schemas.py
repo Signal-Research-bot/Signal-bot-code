@@ -57,7 +57,10 @@ EXTRACT = _obj(
                     },
                     "kind": {
                         "type": "string",
-                        "enum": ["factual", "claim-check", "open-ended", "opinion"],
+                        "description": "How the lead arose in conversation. "
+                        "'claim' and 'entity' matter as much as 'question' -- "
+                        "most real leads are not phrased as questions.",
+                        "enum": ["question", "claim", "entity", "disagreement"],
                     },
                 },
                 ["question", "raised_by", "context", "kind"],
@@ -77,6 +80,11 @@ TRIAGE = _obj(
             "items": _obj(
                 {
                     "question": {"type": "string"},
+                    "in_scope": {
+                        "type": "boolean",
+                        "description": "Is this within the archive's stated "
+                        "subject? False drops it before it costs anything.",
+                    },
                     "worth": {
                         "type": "number",
                         "description": "0-1. How much would a sourced answer "
@@ -91,7 +99,8 @@ TRIAGE = _obj(
                     },
                     "rationale": {"type": "string"},
                 },
-                ["question", "worth", "difficulty", "duplicate_of", "rationale"],
+                ["question", "in_scope", "worth", "difficulty", "duplicate_of",
+                 "rationale"],
             ),
         }
     },
@@ -147,6 +156,25 @@ KB_RECORD = _obj(
             "type": "string",
             "enum": ["open", "researching", "answered", "contested", "dropped"],
         },
+        # research_status is workflow state and confidence is evidence
+        # strength. Neither says what the answer WAS. In an investigative
+        # archive "we checked and it is false" is often the most valuable
+        # result, and without this field it is invisible outside the page body.
+        "finding": {
+            "type": "string",
+            "description": "The substantive result. 'refuted' when the claim "
+            "as raised is contradicted by the sources -- use it plainly, a "
+            "debunking is a real finding. 'mixed' when partly true. "
+            "'unestablished' when the sources do not settle it either way.",
+            "enum": ["supported", "refuted", "mixed", "unestablished"],
+        },
+        "headline": {
+            "type": "string",
+            "description": "One plain sentence stating the result, readable on "
+            "its own with no context. Max ~140 characters. This is what people "
+            "see in the chat summary, so it must carry the actual answer, not "
+            "restate the question.",
+        },
         "evidence": {
             "type": "array",
             "items": _obj(
@@ -175,7 +203,8 @@ KB_RECORD = _obj(
     },
     [
         "title", "question", "answer", "confidence", "research_status",
-        "evidence", "contradictions", "open_questions", "tags",
+        "finding", "headline", "evidence", "contradictions", "open_questions",
+        "tags",
     ],
 )
 

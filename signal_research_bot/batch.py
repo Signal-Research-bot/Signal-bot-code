@@ -61,7 +61,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         # Prints the exact outbound payload, writes nothing, sends nothing --
         # and runs the firewall over it, because "would this have been allowed
         # out?" is the entire question a pre-flight check exists to answer.
-        request = stages.extract(transcript)
+        request = stages.extract(transcript, cfg.research_domain)
         print(json.dumps(request, indent=2, ensure_ascii=False))
         print(f"\n-- dry run: {len(messages)} messages, nothing sent, nothing written --")
         print(json.dumps(builder.stats.as_dict(), indent=2))
@@ -89,14 +89,14 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
     }
 
     # --- stage 1 + 2 ---------------------------------------------------------
-    extracted, _ = client.send_json(**stages.extract(transcript))
+    extracted, _ = client.send_json(**stages.extract(transcript, cfg.research_domain))
     candidates = extracted.get("tasks") or []
     if not candidates:
         _finish(cache, window_id, messages, cfg, client, stats, vault)
         return 0
 
     digest = vault.digest() if vault else "(archive is empty)"
-    triaged, _ = client.send_json(**stages.triage(candidates, digest))
+    triaged, _ = client.send_json(**stages.triage(candidates, digest, cfg.research_domain))
 
     gated = apply_gate(
         triaged.get("tasks") or [],
@@ -109,7 +109,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         log.info("tasks deferred by the cap", extra={"count": len(gated.deferred_over_cap)})
 
     # --- stage 2.5 / 3 / 3b, per task ---------------------------------------
-    written_titles: list[str] = []
+    written_entries: list[dict] = []
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -158,7 +158,15 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
             if vault:
                 vault.write(stem, markdown)
                 stats["written"] += 1
-                written_titles.append(record["title"])
+                written_entries.append({
+                    "title": record.get("title", ""),
+                    "finding": record.get("finding", "unestablished"),
+                    "headline": record.get("headline", ""),
+                })
+                stats.setdefault("findings", {})
+                stats["findings"][record.get("finding", "unestablished")] = (
+                    stats["findings"].get(record.get("finding", "unestablished"), 0) + 1
+                )
 
         except Refusal as exc:
             stats["refusals"] += 1
@@ -172,11 +180,11 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
             stats["failed"] += 1
             log.exception("task failed", extra={"error": type(exc).__name__})
 
-    _finish(cache, window_id, messages, cfg, client, stats, vault, written_titles)
+    _finish(cache, window_id, messages, cfg, client, stats, vault, written_entries)
     return 0
 
 
-def _finish(cache, window_id, messages, cfg, client, stats, vault, titles=()) -> None:
+def _finish(cache, window_id, messages, cfg, client, stats, vault, entries=()) -> None:
     if vault and stats.get("written"):
         git_commit(
             vault.vault_dir,
@@ -198,7 +206,7 @@ def _finish(cache, window_id, messages, cfg, client, stats, vault, titles=()) ->
     if cfg.notify:
         try:
             Notifier(cfg.signal_host, cfg.signal_port, cfg.group_id).summarise_run(
-                stats, list(titles)
+                stats, list(entries)
             )
         except SendFailed as exc:
             # Never fatal. The research is already committed; failing the window

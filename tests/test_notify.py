@@ -103,8 +103,8 @@ def test_send_targets_the_configured_group(daemon):
         "opt out",                               # the remedy
         "Disappearing messages are never processed",
         "under my name",                         # no bot identity on a linked device
-        "source code is public",
-        "typing [research-bot]",                 # the per-message opt-out
+        "code is public",
+        "[research-bot]",                        # the per-message opt-out
     ],
 )
 def test_announcement_states_what_members_need_to_know(phrase):
@@ -114,40 +114,64 @@ def test_announcement_states_what_members_need_to_know(phrase):
 # --- summaries carry counts, not content --------------------------------------
 
 
+def entry(finding="supported", headline="The Q1 report is a review, not an audit."):
+    return {"title": "Research - x - 2026-07", "finding": finding, "headline": headline}
+
+
 def test_quiet_window_posts_nothing():
     """A bot that says '0 new entries' nightly trains everyone to ignore it."""
     assert format_summary({"written": 0, "deferred_over_cap": 0}, []) is None
 
 
-def test_summary_reports_written_entries():
-    text = format_summary({"written": 2}, ["Research - a - 2026-07", "Research - b - 2026-07"])
-    assert "2 new entries" in text and "Research - a - 2026-07" in text
+def test_summary_leads_with_the_result_not_the_title():
+    """A list of titles says work happened. It does not say what was found."""
+    text = format_summary({"written": 1}, [entry(headline="X did not take a stake.")])
+    assert "X did not take a stake." in text
+    assert "Research - x - 2026-07" not in text
 
 
-def test_singular_entry_reads_correctly():
-    assert "1 new entry." in format_summary({"written": 1}, ["Research - a - 2026-07"])
+def test_refutations_are_grouped_first():
+    """A debunking is the thing most worth reading and easiest to miss."""
+    text = format_summary({"written": 2}, [
+        entry("supported", "A is true."), entry("refuted", "B is false."),
+    ])
+    assert text.index("Not true") < text.index("Confirmed")
+
+
+@pytest.mark.parametrize(
+    "finding,heading",
+    [("refuted", "Not true"), ("mixed", "Partly true"),
+     ("supported", "Confirmed"), ("unestablished", "Couldn't establish")],
+)
+def test_every_finding_has_a_plain_english_heading(finding, heading):
+    assert heading in format_summary({"written": 1}, [entry(finding)])
+
+
+def test_entry_with_no_finding_still_appears():
+    """A malformed record must not vanish from the summary silently."""
+    text = format_summary({"written": 1}, [{"title": "T", "headline": "H"}])
+    assert "H" in text
 
 
 def test_deferred_tasks_are_surfaced_not_hidden():
     """The cap is the main cost lever; silent truncation reads as 'nothing missed'."""
-    text = format_summary({"written": 1, "deferred_over_cap": 3}, ["t"])
-    assert "3 question(s) were deferred" in text
+    text = format_summary({"written": 1, "deferred_over_cap": 3}, [entry()])
+    assert "3 lead(s) deferred" in text
 
 
 def test_failures_are_surfaced():
-    text = format_summary({"written": 1, "failed": 2}, ["t"])
+    text = format_summary({"written": 1, "failed": 2}, [entry()])
     assert "2 task(s) failed" in text
 
 
-def test_long_title_lists_are_truncated_with_a_count():
-    titles = [f"Research - {i} - 2026-07" for i in range(15)]
-    text = format_summary({"written": 15}, titles)
-    assert "and 5 more" in text
+def test_long_group_is_truncated_with_a_count():
+    text = format_summary({"written": 9}, [entry("refuted", f"claim {i} is false") for i in range(9)])
+    assert "and 3 more" in text
 
 
 def test_summary_contains_no_participant_labels():
     """A summary is broadcast, so it holds the least of anything here."""
-    text = format_summary({"written": 1, "deferred_over_cap": 2, "failed": 1}, ["t"])
+    text = format_summary({"written": 1, "deferred_over_cap": 2, "failed": 1}, [entry()])
     assert "Participant" not in text
 
 

@@ -21,9 +21,11 @@ from signal_research_bot.gate import (  # noqa: E402
 )
 
 
-def task(q: str, worth: float = 0.9, difficulty: str = "low", duplicate=None) -> dict:
+def task(q: str, worth: float = 0.9, difficulty: str = "low", duplicate=None,
+         in_scope: bool = True) -> dict:
     return {
         "question": q,
+        "in_scope": in_scope,
         "worth": worth,
         "difficulty": difficulty,
         "duplicate_of": duplicate,
@@ -76,9 +78,24 @@ def test_gate_is_deterministic_for_idempotent_reruns():
     ]
 
 
+def test_out_of_scope_is_rejected_before_worth_is_considered():
+    """A high-worth lead about the wrong subject is still the wrong subject."""
+    r = apply_gate([task("x", worth=1.0, in_scope=False)],
+                   worth_threshold=0.6, max_tasks=10)
+    assert r.accepted == [] and len(r.rejected_out_of_scope) == 1
+    assert r.rejected_low_worth == [] and r.rejected_duplicate == []
+
+
+def test_missing_in_scope_defaults_to_in_scope():
+    """Older triage output without the field must not be silently discarded."""
+    t = task("x"); del t["in_scope"]
+    assert len(apply_gate([t], worth_threshold=0.6, max_tasks=10).accepted) == 1
+
+
 def test_everything_is_accounted_for():
     """No task may vanish between triage and the report."""
-    tasks = [task("a", 0.9), task("b", 0.1), task("c", 0.9, duplicate="x"), task("d", 0.9)]
+    tasks = [task("a", 0.9), task("b", 0.1), task("c", 0.9, duplicate="x"),
+             task("d", 0.9), task("e", 0.9, in_scope=False)]
     r = apply_gate(tasks, worth_threshold=0.6, max_tasks=1)
     assert sum(r.counts.values()) == len(tasks)
 

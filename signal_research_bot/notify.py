@@ -39,27 +39,44 @@ SEND_TIMEOUT = 30.0
 # distinction is the entire point of the sentence, and "it is pseudonymisation,
 # not the stronger claim" tells a non-technical reader nothing.
 ANNOUNCEMENT = (
-    "Heads up: I've switched on a research bot for this group.\n"
+    "Quick heads up. I've switched on a bot that turns questions raised in "
+    "here into a sourced research archive we can all read.\n"
     "\n"
-    "What it does: it reads new messages, strips out names and numbers locally, "
-    "and sends the stripped text to an AI to pull out research questions and "
-    "answer them with sources. Answers go into a private archive only people in "
-    "this group can read.\n"
+    "It reads new messages, strips names and numbers out on my machine, then "
+    "sends only the stripped text to an AI to research and answer with "
+    "sources.\n"
     "\n"
-    "What you should know:\n"
+    "How it works in practice:\n"
+    "- Nothing changes for you. Just talk normally. There is no command, no "
+    "trigger word, and nothing to address -- it reads the conversation and "
+    "picks out what's worth checking on its own.\n"
+    "- It looks for anything checkable, not just questions. An offhand claim "
+    "like \"they took a stake through a subsidiary\" is exactly the kind of "
+    "thing it will go and verify.\n"
+    "- It only covers our actual subject: ownership and connections between "
+    "companies and people in the space, reserves and attestations, filings, "
+    "regulatory action, and claims of corruption or conflicts of interest. "
+    "Everything else is ignored, including price talk and predictions.\n"
+    "- It runs on a schedule, so answers show up later, not in the moment.\n"
+    "- Every entry carries its sources, a confidence level, and what's still "
+    "contested. Check the sources -- don't take the answer on trust.\n"
+    "- I'll share access to the archive so you can all read it.\n"
+    "\n"
+    "Straight answers to the obvious questions:\n"
     # scrub-ok: privacy-word-overclaim
-    "- It is pseudonymisation, not anonymisation. I hold the key that maps "
-    "labels back to people, and writing style is not disguised.\n"
-    "- Disappearing messages are never processed. Deleted and edited messages "
-    "are removed or superseded here too.\n"
-    "- You can opt out entirely, any time. Just tell me and your messages are "
-    "dropped at collection. You can also drop a single message by typing "
-    "[research-bot] anywhere in it.\n"
-    "- The full source code is public so you can check any of this yourself.\n"
+    "- It's pseudonymisation, not anonymisation. I hold the key that maps "
+    "labels back to people, and it doesn't disguise how you write.\n"
+    "- Disappearing messages are never processed at all.\n"
+    "- Delete a message and it's dropped here too, and never researched. If "
+    "it had already been written up before you deleted it, that entry stays "
+    "until you tell me -- say the word and I'll pull it.\n"
+    "- Opt out any time, just tell me. To skip a single message, put "
+    "[research-bot] in it.\n"
+    "- Bot messages appear under my name -- a linked device has no separate "
+    "identity -- but they're tagged so you can tell.\n"
     "\n"
-    "Messages from the bot will appear under my name, because it runs as a "
-    "linked device on my account. There is no way to make it show up as anyone "
-    "else."
+    "All the code is public if you want to check any of that: "
+    "https://github.com/Signal-Research-bot/Signal-bot-code"
 )
 
 
@@ -116,16 +133,33 @@ class Notifier:
     def announce(self) -> bool:
         return self.send(ANNOUNCEMENT)
 
-    def summarise_run(self, stats: dict[str, Any], titles: list[str]) -> bool:
-        """Post a run summary. Counts and titles only."""
-        text = format_summary(stats, titles)
+    def summarise_run(self, stats: dict[str, Any], entries: list[dict[str, Any]]) -> bool:
+        """Post a run summary. Findings and headlines only -- never content."""
+        text = format_summary(stats, entries)
         if text is None:
             return False
         return self.send(text)
 
 
-def format_summary(stats: dict[str, Any], titles: list[str]) -> str | None:
+# Ordered so the most interesting result is read first. A refutation is the
+# thing people most want to know and the thing most likely to be missed if it
+# is buried under a list of titles.
+_FINDING_HEADINGS = [
+    ("refuted", "Not true"),
+    ("mixed", "Partly true"),
+    ("supported", "Confirmed"),
+    ("unestablished", "Couldn't establish"),
+]
+
+
+def format_summary(
+    stats: dict[str, Any], entries: list[dict[str, Any]]
+) -> str | None:
     """Build the summary text, or None when there is nothing worth saying.
+
+    Grouped by what was FOUND, not by what was worked on. A list of titles
+    tells the group that effort happened; it does not tell them the Q1 report
+    turned out not to be an audit. Each line leads with the result.
 
     A quiet window posts nothing. A bot that announces "0 new entries" every
     night trains everyone to ignore it, including on the night it matters.
@@ -135,22 +169,41 @@ def format_summary(stats: dict[str, Any], titles: list[str]) -> str | None:
     if not written and not deferred:
         return None
 
-    lines = [f"Research update: {written} new " + ("entry" if written == 1 else "entries") + "."]
-    for title in titles[:10]:
-        lines.append(f"  - {title}")
-    if len(titles) > 10:
-        lines.append(f"  - ...and {len(titles) - 10} more")
+    lines: list[str] = []
+    by_finding: dict[str, list[dict[str, Any]]] = {}
+    for e in entries:
+        by_finding.setdefault(e.get("finding") or "unestablished", []).append(e)
 
+    for key, heading in _FINDING_HEADINGS:
+        group = by_finding.get(key) or []
+        if not group:
+            continue
+        lines.append(f"{heading}:")
+        for e in group[:6]:
+            # The headline carries the answer; the title is only a pointer to
+            # the page, so it is deliberately not repeated here.
+            text = (e.get("headline") or e.get("title") or "").strip()
+            lines.append(f"  - {text}")
+        if len(group) > 6:
+            lines.append(f"  - ...and {len(group) - 6} more")
+        lines.append("")
+
+    if not lines:
+        lines = [f"{written} new " + ("entry" if written == 1 else "entries") + "."]
+
+    tail = []
     if deferred:
         # Surfaced deliberately. A silently truncated list reads exactly like
         # "nothing was missed", and the cap is the main cost lever.
-        lines.append(
-            f"\n{deferred} question(s) were deferred by the per-run cap and "
-            f"will be picked up next time."
+        tail.append(
+            f"{deferred} lead(s) deferred by the per-run cap; picked up next time."
         )
     if stats.get("failed"):
-        lines.append(f"{stats['failed']} task(s) failed and were skipped.")
-    return "\n".join(lines)
+        tail.append(f"{stats['failed']} task(s) failed and were skipped.")
+    if tail:
+        lines.append(" ".join(tail))
+
+    return "\n".join(lines).strip()
 
 
 def main() -> int:

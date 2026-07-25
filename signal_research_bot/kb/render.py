@@ -50,6 +50,7 @@ def frontmatter(record: dict[str, Any], *, title: str, first_raised: str,
             f"title: {title}",
             "entity_type: research_task",
             f"research_status: {record['research_status']}",
+            f"finding: {record.get('finding', 'unestablished')}",
             f"confidence: {record['confidence']}",
             f"first_raised: {first_raised}",
             f"last_verified: {last_verified}",
@@ -102,6 +103,12 @@ def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
             "> Sources disagree on this. See Contradictions below before citing it.",
             "",
         ]
+
+    headline = (record.get("headline") or "").strip()
+    if headline:
+        # The answer, first thing on the page. Someone skimming the vault
+        # should not have to read three sections to learn the result.
+        parts += [f"**{headline}**", ""]
 
     parts += [
         "## Question",

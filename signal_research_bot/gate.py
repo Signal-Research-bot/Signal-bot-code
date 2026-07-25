@@ -34,6 +34,7 @@ ALWAYS_ESCALATE_DIFFICULTY = frozenset({"high"})
 @dataclass(frozen=True)
 class GateResult:
     accepted: list[dict[str, Any]]
+    rejected_out_of_scope: list[dict[str, Any]]
     rejected_low_worth: list[dict[str, Any]]
     rejected_duplicate: list[dict[str, Any]]
     deferred_over_cap: list[dict[str, Any]]
@@ -42,6 +43,7 @@ class GateResult:
     def counts(self) -> dict[str, int]:
         return {
             "accepted": len(self.accepted),
+            "rejected_out_of_scope": len(self.rejected_out_of_scope),
             "rejected_low_worth": len(self.rejected_low_worth),
             "rejected_duplicate": len(self.rejected_duplicate),
             "deferred_over_cap": len(self.deferred_over_cap),
@@ -56,11 +58,17 @@ def apply_gate(
 ) -> GateResult:
     """Split triaged tasks into what gets researched and what does not."""
     duplicates: list[dict[str, Any]] = []
+    out_of_scope: list[dict[str, Any]] = []
     low_worth: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
 
     for task in tasks:
-        if task.get("duplicate_of"):
+        # Scope first: an off-topic lead is dropped before worth is even
+        # considered, because a fascinating question about the wrong subject
+        # still does not belong in this archive.
+        if not task.get("in_scope", True):
+            out_of_scope.append(task)
+        elif task.get("duplicate_of"):
             duplicates.append(task)
         elif float(task.get("worth", 0.0)) < worth_threshold:
             low_worth.append(task)
@@ -73,6 +81,7 @@ def apply_gate(
 
     return GateResult(
         accepted=candidates[:max_tasks],
+        rejected_out_of_scope=out_of_scope,
         rejected_low_worth=low_worth,
         rejected_duplicate=duplicates,
         deferred_over_cap=candidates[max_tasks:],

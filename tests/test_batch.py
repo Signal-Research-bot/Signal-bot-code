@@ -30,6 +30,31 @@ ALICE = str(uuid.UUID(int=0xA11CE))
 GROUP = "Zm9vYmFyZ3JvdXBpZGxvbmdlbm91Z2g9PQ=="
 TS = 1_784_000_000_000
 
+# (distinctive phrase, stage). Order matters: first match wins.
+STAGE_MARKERS = [
+    ("RESEARCHABLE LEADS", "extract"),
+    ("gate in front", "triage"),
+    ("Answer the question from primary sources", "cheap"),
+    ("investigative researcher", "deep"),
+]
+
+
+def test_stage_markers_are_not_stale():
+    """Guards the test helper itself.
+
+    If a prompt is reworded and its marker is not, every request falls through
+    to "format" and the orchestration tests pass while asserting nothing.
+    """
+    from signal_research_bot.claude import stages as st
+    prompts = {
+        "extract": st.EXTRACT_SYSTEM, "triage": st.TRIAGE_SYSTEM,
+        "cheap": st.CHEAP_SYSTEM, "deep": st.DEEP_SYSTEM,
+    }
+    for marker, stage in STAGE_MARKERS:
+        assert marker in prompts[stage], (
+            f"marker {marker!r} no longer appears in the {stage} prompt"
+        )
+
 
 @dataclass
 class FakeClient:
@@ -40,15 +65,17 @@ class FakeClient:
     usage: Usage = field(default_factory=Usage)
 
     def _stage_of(self, request: dict) -> str:
+        """Identify the stage from its prompt.
+
+        Matches on a distinctive phrase per stage. Brittle by nature -- reword
+        a prompt and this silently misroutes everything to "format" -- so
+        _assert_markers_present() below fails loudly if a marker goes stale
+        rather than letting the suite pass while testing nothing.
+        """
         system = str(request.get("system", ""))
-        if "pull out questions" in system:
-            return "extract"
-        if "gate in front" in system:
-            return "triage"
-        if "Answer the question from primary sources" in system:
-            return "cheap"
-        if "investigative researcher" in system:
-            return "deep"
+        for marker, stage in STAGE_MARKERS:
+            if marker in system:
+                return stage
         return "format"
 
     def _resolve(self, request: dict):
@@ -79,6 +106,7 @@ def cfg_for(tmp_path: Path, **kw) -> Config:
         kb_dir=tmp_path / "vault", foreign_vault_dir=None,
         log_level="CRITICAL", max_tasks_per_window=4, worth_threshold=0.6,
         notify=False,
+        research_domain='Financial investigation of the crypto sector.',
     )
     base.update(kw)
     return Config(**base)
@@ -122,9 +150,10 @@ def extracted(n=1):
                        "context": "c", "kind": "factual"} for i in range(n)]}
 
 
-def triaged(n=1, worth=0.9, difficulty="low"):
-    return {"tasks": [{"question": f"q{i}", "worth": worth, "difficulty": difficulty,
-                       "duplicate_of": None, "rationale": "r"} for i in range(n)]}
+def triaged(n=1, worth=0.9, difficulty="low", in_scope=True):
+    return {"tasks": [{"question": f"q{i}", "in_scope": in_scope, "worth": worth,
+                       "difficulty": difficulty, "duplicate_of": None,
+                       "rationale": "r"} for i in range(n)]}
 
 
 def cheap(resolved=True, urls=("https://a.example",)):
@@ -277,3 +306,28 @@ def test_empty_window_writes_nothing(env, monkeypatch, tmp_path):
     install(monkeypatch, client)
     assert batch_mod.run(cfg_for(empty)) == 0
     assert client.calls == []
+
+
+# --- scope gating --------------------------------------------------------------
+
+
+def test_out_of_scope_leads_never_reach_a_research_stage(env, monkeypatch):
+    """The archive has a subject. A fascinating question about the wrong one
+    still costs money and clutters the vault."""
+    client = FakeClient({"extract": extracted(), "triage": triaged(in_scope=False)})
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env))
+    assert "cheap" not in client.calls and "deep" not in client.calls
+
+
+def test_the_domain_actually_reaches_the_model(env, monkeypatch):
+    """A scope setting nothing is told about is not a scope."""
+    seen = {}
+    class Spy(FakeClient):
+        def send_json(self, **request):
+            seen.setdefault(self._stage_of(request), request.get("system", ""))
+            return super().send_json(**request)
+    client = Spy({"extract": {"tasks": []}})
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env, research_domain="UNIQUE-DOMAIN-MARKER"))
+    assert "UNIQUE-DOMAIN-MARKER" in seen.get("extract", "")
