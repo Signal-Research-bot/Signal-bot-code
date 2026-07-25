@@ -26,8 +26,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-TARGET = REPO_ROOT / "signal_research_bot" / "egress.py"
-SUITE = "tests/test_egress.py"
+EGRESS = REPO_ROOT / "signal_research_bot" / "egress.py"
+CLIENT = REPO_ROOT / "signal_research_bot" / "claude" / "client.py"
+SUITE = "tests/test_egress.py tests/test_client.py"
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class Mutation:
     label: str
     old: str
     new: str
+    target: Path = EGRESS
 
 
 MUTATIONS: tuple[Mutation, ...] = (
@@ -78,13 +80,33 @@ MUTATIONS: tuple[Mutation, ...] = (
         "for p in self.roster.phones:",
         "for p in ():",
     ),
+    # The claim these defend: there is no path to the API that skips the
+    # firewall. A reviewer can read that in client.py; these prove it.
+    Mutation(
+        "client sends without the outbound firewall",
+        "sha = guard(request, self.policy, self.quarantine_dir)",
+        'sha = "unchecked"',
+        CLIENT,
+    ),
+    Mutation(
+        "client returns a response without the inbound firewall",
+        "check_inbound(text, self.policy)",
+        "pass",
+        CLIENT,
+    ),
+    Mutation(
+        "client reads the body before checking for a refusal",
+        'if getattr(response, "stop_reason", None) == "refusal":',
+        'if False and getattr(response, "stop_reason", None) == "refusal":',
+        CLIENT,
+    ),
 )
 
 
 def _run_suite() -> bool:
     """True if the suite passes."""
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", SUITE, "-q", "--no-header", "-x"],
+        [sys.executable, "-m", "pytest", *SUITE.split(), "-q", "--no-header", "-x"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -93,31 +115,36 @@ def _run_suite() -> bool:
 
 
 def main() -> int:
-    original = TARGET.read_text(encoding="utf-8")
+    targets = {m.target for m in MUTATIONS}
+    originals = {t: t.read_text(encoding="utf-8") for t in targets}
 
     if not _run_suite():
         print("baseline suite is already failing -- fix that first.", file=sys.stderr)
         return 2
 
     with tempfile.TemporaryDirectory() as tmp:
-        backup = Path(tmp) / "egress.py"
-        shutil.copy2(TARGET, backup)
+        backups = {t: Path(tmp) / f"{i}.py" for i, t in enumerate(targets)}
+        for t, b in backups.items():
+            shutil.copy2(t, b)
         survivors: list[str] = []
         try:
             for m in MUTATIONS:
-                if m.old not in original:
-                    print(f"  STALE   {m.label}: pattern no longer present")
+                source = originals[m.target]
+                if m.old not in source:
+                    print(f"  STALE    {m.label}: pattern no longer present")
                     survivors.append(f"{m.label} (stale pattern)")
                     continue
 
-                TARGET.write_text(original.replace(m.old, m.new, 1), encoding="utf-8")
+                m.target.write_text(source.replace(m.old, m.new, 1), encoding="utf-8")
                 if _run_suite():
                     print(f"  SURVIVED {m.label}")
                     survivors.append(m.label)
                 else:
                     print(f"  killed   {m.label}")
+                m.target.write_text(source, encoding="utf-8")
         finally:
-            shutil.copy2(backup, TARGET)
+            for t, b in backups.items():
+                shutil.copy2(b, t)
 
     if survivors:
         print(
