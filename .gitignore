@@ -5,6 +5,15 @@
 # history forever. Do not reorder the initial commits.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# --- The operator's personal runbook -----------------------------------------
+# SETUP.md is deliberately NOT published. A copy-paste guide for a beginner has
+# to contain real drive paths, the vault location, and example phone numbers,
+# and those describe the operator's machine and unrelated private work.
+# Genericising it would make it useless for its one reader; publishing it would
+# leak layout. So it stays local, and README.md carries the generic setup that
+# someone auditing the code actually needs.
+SETUP.md
+
 # --- Secrets and host-specific identity -------------------------------------
 .env
 .env.*

@@ -101,6 +101,14 @@ services:
     networks: [internal]
     volumes:
       - cache:/cache
+      # The vault is the ONE place a host path is legitimately bind-mounted:
+      # it is the deliverable, and it must be visible to Obsidian on Windows.
+      # Supplied from .env so no host path appears in this published file.
+      - ${SRB_KB_DIR:?set SRB_KB_DIR in .env}:/vault
+      # roster.json, the pseudonym map, quarantine and metrics. Relative to the
+      # compose file, so no host path appears here. Everything under it is
+      # gitignored on the host.
+      - ../var:/app/var
     environment:
       SRB_SIGNAL_HOST: signal-cli
       SRB_SIGNAL_PORT: "7583"
@@ -109,5 +117,8 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
       SRB_MAX_TASKS_PER_WINDOW: ${SRB_MAX_TASKS_PER_WINDOW:-4}
       SRB_WORTH_THRESHOLD: ${SRB_WORTH_THRESHOLD:-0.6}
+      SRB_NOTIFY: ${SRB_NOTIFY:-false}
+      SRB_KB_DIR: /vault
+      SRB_VAR_DIR: /app/var
     logging: *logging
     command: ["python", "-m", "signal_research_bot.batch"]
