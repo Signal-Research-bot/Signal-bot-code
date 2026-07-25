@@ -1,0 +1,36 @@
+# The pipeline worker: receiver, redaction, Claude cascade, KB writer.
+#
+# Separate from the signal-cli image on purpose. signal-cli is GPLv3, and
+# keeping it in its own image means this one can be published and shared
+# without dragging those obligations along. (Neither image is published --
+# see README -- but the separation keeps that option open and keeps the
+# trust boundary legible.)
+FROM python:3.12-slim-bookworm
+
+# libsqlcipher is needed by sqlcipher3-wheels' runtime on slim images.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libsqlcipher0 ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10002 --create-home --home-dir /home/worker worker
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY signal_research_bot/ ./signal_research_bot/
+COPY tools/ ./tools/
+
+# The cache holds unredacted message content and lives in a named volume, on
+# the Linux filesystem inside the WSL2 VHDX. Never a bind mount from the
+# Windows host: SQLite locking over 9p/drvfs is fragile, and a bind mount into
+# the repo tree would put the file within reach of `git add -f`.
+ENV SRB_CACHE_DIR=/cache \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+RUN mkdir -p /cache && chown -R worker:worker /cache /app
+VOLUME ["/cache"]
+
+USER worker
+
+CMD ["python", "-m", "signal_research_bot.run_receiver"]

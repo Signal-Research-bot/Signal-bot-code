@@ -1,0 +1,55 @@
+# signal-cli, GraalVM native build. No JRE anywhere in this image.
+#
+# The native tarball is glibc-linked (upstream builds it on Ubuntu), so the
+# base must be glibc. Alpine/musl will produce a binary that exits immediately
+# with a confusing loader error.
+#
+# Version and checksum are both pinned. An unpinned `latest` here would mean a
+# rebuild silently changes the code that holds the Signal account's identity
+# keys, which is exactly the kind of thing a publicly auditable repo should
+# not do.
+FROM debian:12-slim AS fetch
+
+ARG SIGNAL_CLI_VERSION=0.14.6
+ARG SIGNAL_CLI_SHA256=c78639c2d3c14cd004872a99ecf129bd7d7c26ee7d9844d50c2b0afdafefea68
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp/dl
+RUN set -eux; \
+    url="https://github.com/AsamK/signal-cli/releases/download/v${SIGNAL_CLI_VERSION}/signal-cli-${SIGNAL_CLI_VERSION}-Linux-native.tar.gz"; \
+    curl -fsSL -o signal-cli.tar.gz "$url"; \
+    echo "${SIGNAL_CLI_SHA256}  signal-cli.tar.gz" | sha256sum -c -; \
+    tar -xzf signal-cli.tar.gz; \
+    install -m 0755 signal-cli /usr/local/bin/signal-cli; \
+    /usr/local/bin/signal-cli --version
+
+
+FROM debian:12-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --create-home --home-dir /home/signal signal
+
+COPY --from=fetch /usr/local/bin/signal-cli /usr/local/bin/signal-cli
+
+# signal-cli stores account state under $XDG_DATA_HOME/signal-cli. That
+# directory IS the linked-device identity: it holds the keys that let this
+# container act as the operator's Signal account. It lives in a named volume,
+# never a bind mount into the repo tree.
+ENV XDG_DATA_HOME=/data
+RUN mkdir -p /data && chown -R signal:signal /data
+VOLUME ["/data"]
+
+USER signal
+EXPOSE 7583
+
+# --receive-mode=on-connection is the flag the whole system's durability rests
+# on: signal-cli fetches from Signal only while a JSON-RPC client is attached,
+# so the queue stays server-side while the worker is down. Any other mode acks
+# to Signal before our code sees the message, and a crash loses it silently.
+CMD ["signal-cli", "--config", "/data", "daemon", \
+     "--tcp", "0.0.0.0:7583", "--receive-mode=on-connection"]

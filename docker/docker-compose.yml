@@ -1,0 +1,113 @@
+# Nothing host-specific belongs in this file -- it is published. Every path is
+# a named volume, every name is static, and anything that varies by machine
+# comes from .env (see .env.example).
+#
+# Named volumes live inside the WSL2 VHDX on whichever drive Docker Desktop is
+# configured to use. Check that before first run: a Docker Desktop reinstall
+# can silently reset the disk image location back to C:.
+
+name: signal-research-bot
+
+# The JSON-RPC port is NOT published to the host. Anyone who can reach it can
+# send messages as the operator and read the account's state -- it is
+# equivalent to the Signal account itself. Only the worker needs it, and the
+# compose network is enough for that.
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  signal-data:      # linked-device identity keys. Back up only while stopped.
+  cache:            # unredacted message cache, SQLCipher-encrypted.
+
+# Docker's default json-file driver has NO size limit. A 24/7 chatty container
+# grows the VHDX until the disk fills, and the VHDX does not shrink back.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  signal-cli:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.signal-cli
+    container_name: srb-signal-cli
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - signal-data:/data
+    logging: *logging
+    healthcheck:
+      # The daemon is healthy when the JSON-RPC port accepts a connection.
+      # Deliberately does not send a request: with on-connection receive mode,
+      # connecting is subscribing, and a probe that connects and drops would
+      # churn the Signal fetch loop.
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/7583' || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: srb-worker
+    restart: unless-stopped
+    depends_on:
+      signal-cli:
+        condition: service_healthy
+    networks: [internal]
+    volumes:
+      - cache:/cache
+    environment:
+      SRB_SIGNAL_HOST: signal-cli
+      SRB_SIGNAL_PORT: "7583"
+      SRB_GROUP_ID: ${SRB_GROUP_ID:?set SRB_GROUP_ID in .env}
+      SRB_CACHE_KEY: ${SRB_CACHE_KEY:?set SRB_CACHE_KEY in .env}
+      SRB_LOG_LEVEL: ${SRB_LOG_LEVEL:-INFO}
+    logging: *logging
+
+  # --- one-shot profiles ----------------------------------------------------
+
+  # Interactive, once, to link this container as a device on the operator's
+  # account:  docker compose --profile link run --rm link
+  # Prints an sgnl:// URI to scan from the phone. Choose "Don't Transfer" --
+  # signal-cli cannot consume the history archive, so accepting it wastes the
+  # one-time offer.
+  link:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.signal-cli
+    profiles: ["link"]
+    networks: [internal]
+    volumes:
+      - signal-data:/data
+    entrypoint: ["signal-cli", "--config", "/data", "link", "-n", "research-bot"]
+
+  # The scheduled batch job:
+  #   docker compose --profile batch run --rm batch
+  # A separate service rather than `run` against `worker`, so the long-running
+  # receiver is never restarted to run a batch. Both touch the same SQLite
+  # cache; WAL plus busy_timeout=10000 covers the overlap, and the batch is
+  # idempotent so a late double-run is harmless.
+  batch:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    profiles: ["batch"]
+    networks: [internal]
+    volumes:
+      - cache:/cache
+    environment:
+      SRB_SIGNAL_HOST: signal-cli
+      SRB_SIGNAL_PORT: "7583"
+      SRB_GROUP_ID: ${SRB_GROUP_ID:?set SRB_GROUP_ID in .env}
+      SRB_CACHE_KEY: ${SRB_CACHE_KEY:?set SRB_CACHE_KEY in .env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
+      SRB_MAX_TASKS_PER_WINDOW: ${SRB_MAX_TASKS_PER_WINDOW:-4}
+      SRB_WORTH_THRESHOLD: ${SRB_WORTH_THRESHOLD:-0.6}
+    logging: *logging
+    command: ["python", "-m", "signal_research_bot.batch"]
