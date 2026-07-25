@@ -53,6 +53,7 @@ Nothing about the operator or the host may reach either git repo. Both repos are
 - generated KB pages carry no `source_path`, hostname, or local run ID in frontmatter
 - container names are static, never derived from `$COMPUTERNAME`
 - test fixtures and recorded API responses are **synthetic only** — never captured from a real run
+- **no tracked file contains a contiguous phone-, email- or UUID-shaped string.** Test fixtures assemble them at runtime (`str(uuid.UUID(int=0xA11CE))`, `"+" + "1" + "415" + …`). Neither `scrub_check` nor a human reviewer can distinguish a synthetic literal from a real one, so the repo simply never contains one. The sole exception is `tests/test_scrub.py`, which is allowlisted because a detector cannot be tested without something to detect.
 
 `tools/scrub_check.py` runs in pre-commit **and** CI. Pre-commit alone is insufficient because `SKIP=` bypasses it.
 
