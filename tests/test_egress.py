@@ -274,3 +274,44 @@ def test_quarantine_filename_carries_rule_and_sha(policy, tmp_path):
     except EgressViolation as v:
         path = quarantine(body("Anna Smith"), v, tmp_path)
         assert v.payload_sha in path.name and v.rule in path.name
+
+
+# --- false positives that would block every batch -----------------------------
+
+
+def test_iso_date_is_not_a_phone_number(policy):
+    """Regression found by an end-to-end dry run.
+
+    The transcript builder writes "--- 2026-07-14 03:30 UTC ---" headers, and
+    the separated-phone shape matches an ISO date. The firewall was blocking
+    its own output on every single batch.
+    """
+    check_outbound(body("--- 2026-07-14 03:30 UTC ---\nParticipant A: hello"), policy)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "filed 2024-01-31 and restated 2025-12-01",
+        "between 2019-03 and 2021-11 the figure moved",
+        "reserves hit 3200000000 in Q1",
+        "see section 10-K-2 paragraph 4",
+    ],
+)
+def test_ordinary_dates_and_figures_pass(policy, text):
+    check_outbound(body(f"Participant A: {text}"), policy)
+
+
+def test_a_separated_phone_is_still_caught(policy):
+    """The loosened rule must not stop catching what it exists for.
+
+    Uses a number NOT in the roster, so this exercises the shape rule rather
+    than the more specific roster-digit check that would otherwise fire first.
+    """
+    formatted = "212" + "-" + "555" + "-" + "0198"
+    assert blocked(body(f"Participant A: call {formatted}"), policy) == "separated-phone"
+
+
+def test_a_separated_phone_with_spaces_is_caught(policy):
+    spaced = "212" + " " + "555" + " " + "0198"
+    assert blocked(body(f"Participant A: call {spaced}"), policy) == "separated-phone"

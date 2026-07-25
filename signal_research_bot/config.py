@@ -24,6 +24,26 @@ def _require(name: str) -> str:
     return value
 
 
+# A Signal group id is base64 of 32 bytes -- 44 characters. The egress firewall
+# checks for it by substring, which is correct for a real id and catastrophic
+# for a short one: "g" occurs in almost any text, so every batch would be
+# blocked with no obvious cause. Catching it here turns a baffling runtime
+# symptom into a config error naming the variable.
+MIN_GROUP_ID_LEN = 16
+
+
+def _require_group_id() -> str:
+    value = _require("SRB_GROUP_ID")
+    if len(value) < MIN_GROUP_ID_LEN:
+        raise ConfigError(
+            f"SRB_GROUP_ID is {len(value)} characters, which is too short to be "
+            f"a real Signal group id (they are 44). A short value would match "
+            f"as a substring of ordinary text and block every batch. "
+            f"Run `signal-cli --config /data listGroups` to get the real one."
+        )
+    return value
+
+
 def _path(name: str, default: str) -> Path:
     return Path(os.environ.get(name, default)).expanduser()
 
@@ -54,7 +74,7 @@ class Config:
         return cls(
             signal_host=os.environ.get("SRB_SIGNAL_HOST", "signal-cli"),
             signal_port=int(os.environ.get("SRB_SIGNAL_PORT", "7583")),
-            group_id=_require("SRB_GROUP_ID"),
+            group_id=_require_group_id(),
             cache_path=cache_dir / "messages.db",
             cache_key=os.environ.get("SRB_CACHE_KEY") or None,
             roster_path=var_dir / "roster.json",

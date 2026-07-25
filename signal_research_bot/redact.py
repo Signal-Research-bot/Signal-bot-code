@@ -40,6 +40,24 @@ PLACEHOLDER_UUID = "[id]"
 PLACEHOLDER_IBAN = "[account]"
 PLACEHOLDER_URL = "[personal-link]"
 
+# A message whose content is nothing but placeholders carries no information.
+# The transcript builder uses this to drop those lines rather than spend tokens
+# on "Participant A: [participant]".
+PLACEHOLDERS = frozenset(
+    {
+        PLACEHOLDER_NAME, PLACEHOLDER_PHONE, PLACEHOLDER_EMAIL,
+        PLACEHOLDER_UUID, PLACEHOLDER_IBAN, PLACEHOLDER_URL, "[group]",
+    }
+)
+
+
+def is_only_placeholders(text: str) -> bool:
+    """True if nothing but placeholders and punctuation survived redaction."""
+    stripped = text
+    for placeholder in PLACEHOLDERS:
+        stripped = stripped.replace(placeholder, " ")
+    return not any(ch.isalnum() for ch in stripped)
+
 # Hosts where a link is almost always to a person, not to a source document.
 PERSONAL_HOSTS = frozenset(
     {
@@ -145,7 +163,8 @@ class Redactor:
                 continue
         for m in LOOSE_PHONE_RE.finditer(text):
             digits = sum(c.isdigit() for c in m.group())
-            if 8 <= digits <= 15:
+            # >= 9 so an ISO date (8 digits) is not read as a phone number.
+            if 9 <= digits <= 15:
                 spans.append((m.start(), m.end()))
 
         if not spans:

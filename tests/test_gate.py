@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest  # noqa: E402
 from signal_research_bot.gate import (  # noqa: E402
     allowed_urls,
     apply_gate,
@@ -167,3 +168,29 @@ def test_grounded_citation_passes():
 
 def test_record_with_no_evidence_is_trivially_grounded():
     assert reject_ungrounded({"evidence": []}, set()) == []
+
+
+# --- config validation --------------------------------------------------------
+
+
+def test_short_group_id_is_rejected_with_a_useful_message(monkeypatch):
+    """Regression found by an end-to-end dry run.
+
+    The egress firewall checks for the group id by substring, which is right
+    for a real 44-character id and catastrophic for a short one: "g" occurs in
+    almost any text, so every batch was blocked with no obvious cause. The
+    error now names the variable instead.
+    """
+    from signal_research_bot.config import Config, ConfigError
+
+    monkeypatch.setenv("SRB_GROUP_ID", "g")
+    with pytest.raises(ConfigError) as exc:
+        Config.from_env()
+    assert "SRB_GROUP_ID" in str(exc.value) and "too short" in str(exc.value)
+
+
+def test_realistic_group_id_is_accepted(monkeypatch):
+    from signal_research_bot.config import Config
+
+    monkeypatch.setenv("SRB_GROUP_ID", "Zm9vYmFyZ3JvdXBpZGxvbmdlbm91Z2g9PQ==")
+    assert Config.from_env().group_id.startswith("Zm9v")

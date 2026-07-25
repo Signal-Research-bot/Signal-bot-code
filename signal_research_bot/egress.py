@@ -152,10 +152,20 @@ def _assert_no_identity_shapes(text: str, sha: str) -> None:
         ("uuid", UUID_RE),
         ("email", EMAIL_RE),
         ("e164-phone", E164_RE),
-        ("separated-phone", SEPARATED_PHONE_RE),
     ):
         if pattern.search(text):
             raise EgressViolation(rule, f"text matching {rule} is present", sha)
+
+    # The separated-phone shape (digits, separator, digits, separator, digits)
+    # also describes an ISO date. "2026-07-14" carries 8 digits; the shortest
+    # international phone number carries 9. Requiring 9 keeps real numbers
+    # caught and stops the firewall blocking its own timestamp headers -- which
+    # it did, on every batch, until an end-to-end run surfaced it.
+    for match in SEPARATED_PHONE_RE.finditer(text):
+        if len(_digits(match.group())) >= 9:
+            raise EgressViolation(
+                "separated-phone", "text matching separated-phone is present", sha
+            )
 
 
 def _assert_labels_are_allowed(text: str, policy: Policy, sha: str) -> None:
