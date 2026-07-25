@@ -1,0 +1,24 @@
+# Local hooks only -- no remote repos.
+#
+# A pre-commit config that pulls hooks from other repositories runs third-party
+# code on every commit in a project whose whole point is that you can audit what
+# touches your group's messages. These call scripts in this repo instead.
+#
+# NOTE: pre-commit is convenience, NOT a control. `git commit --no-verify` and
+# `SKIP=...` both bypass it, which is exactly why the same checks run in CI.
+repos:
+  - repo: local
+    hooks:
+      - id: scrub-check
+        name: block host/author identifiers from being committed
+        entry: python -m tools.scrub_check
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: pytest
+        name: full test suite
+        entry: python -m pytest -q
+        language: system
+        pass_filenames: false
+        always_run: true

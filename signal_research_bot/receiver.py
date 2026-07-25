@@ -45,7 +45,16 @@ log = logging.getLogger(__name__)
 # Marker the bot puts in its own summary posts. Those arrive back through the
 # receiver like any other message; without this the next window ingests the
 # previous window's summary and summarises the summary, forever.
-BOT_MARKER = "⁣[research-bot]"
+#
+# Deliberately VISIBLE and plain ASCII. An invisible marker was tried first and
+# was wrong twice over: it crashed on a cp1252 Windows console, and -- more
+# importantly -- it hid from members which messages came from the bot, in a
+# project whose whole premise is that they can tell.
+#
+# A visible marker also gives members a per-message opt-out for free: type it
+# and that message is dropped at ingest. That is documented in PRIVACY.md
+# rather than treated as a hole.
+BOT_MARKER = "[research-bot]"
 
 BACKOFF_INITIAL = 1.0
 BACKOFF_MAX = 60.0

@@ -268,9 +268,25 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--all", action="store_true", help="scan every tracked file")
     ap.add_argument("--paths", nargs="*", default=[], help="explicit paths to scan")
+    ap.add_argument(
+        "--structural-only",
+        action="store_true",
+        help="skip the host-specific token list (for CI, where it does not exist). "
+             "Structural rules still run; coverage is reduced and reported.",
+    )
     args = ap.parse_args()
 
-    rules = STRUCTURAL_RULES + token_rules(load_tokens())
+    if args.structural_only:
+        # Said out loud rather than silently degraded. A run that checks fewer
+        # rules must not look identical to one that checks all of them.
+        print(
+            "scrub_check: WARNING -- running structural rules only. The "
+            "host-specific token list was not supplied, so author names, "
+            "usernames and hostnames are NOT being checked."
+        )
+        rules = list(STRUCTURAL_RULES)
+    else:
+        rules = STRUCTURAL_RULES + token_rules(load_tokens())
     paths = target_files("all" if args.all else "staged", args.paths)
 
     if not paths:

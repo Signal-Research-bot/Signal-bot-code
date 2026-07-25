@@ -68,6 +68,13 @@ If you think that trade-off is wrong, say so — it is one line of configuration
 - **Anyone who opts out.** Ask the operator and your messages are dropped at
   the point of collection — along with your reactions and any text of yours
   quoted by others.
+- **Any single message you mark.** Type `[research-bot]` anywhere in a message
+  and it is dropped at collection. That marker exists so the bot's own posts
+  are not re-processed, and it works for anyone — no need to ask first.
+
+Messages the bot itself posts carry that same visible `[research-bot]` tag, so
+you can always tell which messages came from the automation rather than from
+the operator typing.
 
 ## What reaches Anthropic, and what they do with it
 

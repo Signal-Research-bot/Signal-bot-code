@@ -64,6 +64,7 @@ class Config:
     log_level: str
     max_tasks_per_window: int
     worth_threshold: float
+    notify: bool
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -86,4 +87,5 @@ class Config:
             log_level=os.environ.get("SRB_LOG_LEVEL", "INFO").upper(),
             max_tasks_per_window=int(os.environ.get("SRB_MAX_TASKS_PER_WINDOW", "4")),
             worth_threshold=float(os.environ.get("SRB_WORTH_THRESHOLD", "0.6")),
+            notify=os.environ.get("SRB_NOTIFY", "false").lower() in {"1", "true", "yes"},
         )

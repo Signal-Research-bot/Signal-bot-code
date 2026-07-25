@@ -193,3 +193,29 @@ def test_cli_runs_against_the_real_repo():
     assert proc.returncode == 0, (
         f"scrub_check failed on the real repo:\n{proc.stdout}\n{proc.stderr}"
     )
+
+
+# --- CI mode ------------------------------------------------------------------
+
+
+def test_structural_only_mode_warns_loudly(capsys, monkeypatch):
+    """Reduced coverage must not look identical to full coverage.
+
+    CI has no token file. Running structural rules only is the right fallback,
+    but a silent one would let a green tick imply checks that never ran.
+    """
+    monkeypatch.setattr(sys, "argv", ["scrub_check", "--all", "--structural-only"])
+    from tools.scrub_check import main
+
+    main()
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "structural rules only" in out
+    assert "NOT being checked" in out
+
+
+def test_structural_only_still_catches_shapes(tmp_path):
+    """The fallback must remain useful, not merely quiet."""
+    findings, _ = scan(
+        [_write(tmp_path, r'p = "C:\Users\someone\x"')], list(STRUCTURAL_RULES)
+    )
+    assert any(r == "absolute-windows-path" for _, _, r, _ in findings)

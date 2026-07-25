@@ -31,6 +31,7 @@ from .kb.render import render, title_for
 from .kb.writer import VaultError, VaultWriter, git_commit
 from .logging_setup import configure
 from .metrics import record_run
+from .notify import Notifier, SendFailed
 from .redact import RedactionUnavailable, Redactor
 from .transcript import Builder
 
@@ -108,6 +109,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         log.info("tasks deferred by the cap", extra={"count": len(gated.deferred_over_cap)})
 
     # --- stage 2.5 / 3 / 3b, per task ---------------------------------------
+    written_titles: list[str] = []
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -156,6 +158,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
             if vault:
                 vault.write(stem, markdown)
                 stats["written"] += 1
+                written_titles.append(record["title"])
 
         except Refusal as exc:
             stats["refusals"] += 1
@@ -169,11 +172,11 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
             stats["failed"] += 1
             log.exception("task failed", extra={"error": type(exc).__name__})
 
-    _finish(cache, window_id, messages, cfg, client, stats, vault)
+    _finish(cache, window_id, messages, cfg, client, stats, vault, written_titles)
     return 0
 
 
-def _finish(cache, window_id, messages, cfg, client, stats, vault) -> None:
+def _finish(cache, window_id, messages, cfg, client, stats, vault, titles=()) -> None:
     if vault and stats.get("written"):
         git_commit(
             vault.vault_dir,
@@ -191,6 +194,16 @@ def _finish(cache, window_id, messages, cfg, client, stats, vault) -> None:
     )
     record_run(cfg.metrics_path, stats)
     log.info("window complete", extra=stats)
+
+    if cfg.notify:
+        try:
+            Notifier(cfg.signal_host, cfg.signal_port, cfg.group_id).summarise_run(
+                stats, list(titles)
+            )
+        except SendFailed as exc:
+            # Never fatal. The research is already committed; failing the window
+            # over an undelivered summary would throw away the expensive part.
+            log.warning("summary not delivered", extra={"error": str(exc)})
     cache.close()
 
 
