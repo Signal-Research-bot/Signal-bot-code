@@ -156,11 +156,20 @@ class Notifier:
 # thing people most want to know and the thing most likely to be missed if it
 # is buried under a list of titles.
 _FINDING_HEADINGS = [
-    ("refuted", "Not true"),
-    ("mixed", "Partly true"),
-    ("supported", "Confirmed"),
-    ("unestablished", "Couldn't establish"),
+    ("refuted", "❌ Not true"),
+    ("mixed", "🟨 Partly true"),
+    ("supported", "✅ Confirmed"),
+    ("unestablished", "❓ Couldn't establish"),
 ]
+
+SUMMARY_HEADER = "🔎 Research bot — new findings"
+
+# One line, on every summary. A linked device has no separate identity, so the
+# only place the automation disclosure can live is the message body itself.
+SUMMARY_FOOTER = (
+    "🤖 Automated message — compiled and posted by the research bot, "
+    "not typed by hand."
+)
 
 
 def format_summary(
@@ -180,7 +189,7 @@ def format_summary(
     if not written and not deferred:
         return None
 
-    lines: list[str] = []
+    body: list[str] = []
     by_finding: dict[str, list[dict[str, Any]]] = {}
     for e in entries:
         by_finding.setdefault(e.get("finding") or "unestablished", []).append(e)
@@ -189,32 +198,35 @@ def format_summary(
         group = by_finding.get(key) or []
         if not group:
             continue
-        lines.append(f"{heading}:")
+        body.append(f"{heading}:")
         for e in group[:6]:
             # The headline carries the answer; the title is only a pointer to
             # the page, so it is deliberately not repeated here.
             text = (e.get("headline") or e.get("title") or "").strip()
-            lines.append(f"  - {text}")
+            body.append(f"  - {text}")
         if len(group) > 6:
-            lines.append(f"  - ...and {len(group) - 6} more")
-        lines.append("")
+            body.append(f"  - ...and {len(group) - 6} more")
+        body.append("")
 
-    if not lines:
-        lines = [f"{written} new " + ("entry" if written == 1 else "entries") + "."]
+    if not body:
+        body = [f"{written} new " + ("entry" if written == 1 else "entries") + ".", ""]
 
     tail = []
     if deferred:
         # Surfaced deliberately. A silently truncated list reads exactly like
-        # "nothing was missed", and the cap is the main cost lever.
+        # "nothing was missed", and the cap is the main cost lever. "Logged",
+        # not "picked up next time": the pipeline never revisits these, and a
+        # summary must not promise what the gate does not do.
         tail.append(
-            f"{deferred} lead(s) deferred by the per-run cap; picked up next time."
+            f"{deferred} lead(s) deferred by the per-run cap; logged for manual follow-up."
         )
     if stats.get("failed"):
         tail.append(f"{stats['failed']} task(s) failed and were skipped.")
     if tail:
-        lines.append(" ".join(tail))
+        body.append(" ".join(tail))
+        body.append("")
 
-    return "\n".join(lines).strip()
+    return "\n".join([SUMMARY_HEADER, "", *body, SUMMARY_FOOTER]).strip()
 
 
 def main() -> int:

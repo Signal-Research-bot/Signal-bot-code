@@ -169,6 +169,27 @@ def test_long_group_is_truncated_with_a_count():
     assert "and 3 more" in text
 
 
+def test_summary_opens_with_the_bot_header():
+    """The sender line shows the operator; the first line must show the bot."""
+    assert format_summary({"written": 1}, [entry()]).startswith("🔎 Research bot")
+
+
+def test_summary_ends_with_the_automation_disclosure():
+    """Linked-device messages carry no bot badge, so the disclosure rides in
+    the body -- on every summary, including the no-entries fallback."""
+    with_entries = format_summary({"written": 1}, [entry()])
+    fallback = format_summary({"written": 2, "deferred_over_cap": 1}, [])
+    assert with_entries.endswith("not typed by hand.")
+    assert fallback.endswith("not typed by hand.")
+
+
+def test_deferred_leads_are_not_promised_to_run_later():
+    """The gate logs deferrals; nothing re-queues them. The summary must not
+    claim otherwise."""
+    text = format_summary({"written": 1, "deferred_over_cap": 3}, [entry()])
+    assert "picked up next time" not in text
+
+
 def test_summary_contains_no_participant_labels():
     """A summary is broadcast, so it holds the least of anything here."""
     text = format_summary({"written": 1, "deferred_over_cap": 2, "failed": 1}, [entry()])
