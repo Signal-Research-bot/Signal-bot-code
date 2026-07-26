@@ -171,4 +171,13 @@ services:
       SRB_PSEUDONYM_KEY_FILE: /app/var/pseudonym.key
       SRB_FOREIGN_VAULT_DIR: ${SRB_FOREIGN_VAULT_DIR:-}
     logging: *logging
-    command: ["python", "-m", "signal_research_bot.batch"]
+    # entrypoint, NOT command. `docker compose run batch --dry-run` REPLACES
+    # `command` with its own arguments, so the documented pre-flight check tried
+    # to exec "--dry-run" as a binary and died with "executable file not found".
+    # As an entrypoint the arguments append instead, which is what every doc in
+    # this repo has been telling the operator to do.
+    #
+    # That check is the only look anyone gets at the outbound payload before the
+    # first paid call, so it failing was worse than an ordinary broken command.
+    entrypoint: ["python", "-m", "signal_research_bot.batch"]
+    command: []

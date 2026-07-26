@@ -415,3 +415,38 @@ def test_an_ordinary_title_keeps_a_clean_filename():
         first_raised="2026-07-26", last_verified="2026-07-26",
     )
     assert stem == "Research - are the reserves audited - 2026-07"
+
+
+def test_commit_works_when_the_repo_is_owned_by_another_user(vault, monkeypatch):
+    """The vault is a bind mount, so inside the container every file presents as
+    uid 0 while the process is uid 10002. Git refuses with "detected dubious
+    ownership", rev-parse returns non-zero, and git_commit read that as "not a
+    git repository" and skipped the commit.
+
+    The first live run hit it: the page was written, never committed, and no
+    member could read what the run had just paid to produce.
+
+    The ownership mismatch itself cannot be simulated portably, so this asserts
+    the mechanism that governs it: every git invocation must carry
+    `-c safe.directory=<vault>`, scoped to that one path.
+    """
+    subprocess.run(["git", "init", "-q", str(vault)], check=True)
+    seen: list[list[str]] = []
+    real = subprocess.run
+
+    def spy(args, **kwargs):
+        if isinstance(args, list) and args and args[0] == "git":
+            seen.append(args)
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    w = VaultWriter(vault)
+    w.write("r", "x")
+    assert git_commit(vault, "add r") is True
+
+    assert seen, "no git command was run"
+    for args in seen:
+        assert "-c" in args, f"git invoked without -c: {args}"
+        assert f"safe.directory={vault}" in args, (
+            f"git invoked without safe.directory scoped to the vault: {args}"
+        )

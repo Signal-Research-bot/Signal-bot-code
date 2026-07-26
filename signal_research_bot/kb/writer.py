@@ -105,12 +105,34 @@ def git_commit(vault_dir: Path, message: str, *, push: bool = False) -> bool:
     """
     def run(*args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["git", "-C", str(vault_dir), *args],
+            # `-c safe.directory` is not optional here.
+            #
+            # The vault is a bind mount from the Windows host, so inside the
+            # container every file presents as uid 0 while the process runs as
+            # uid 10002. Git refuses to operate on a repository owned by
+            # someone else -- "detected dubious ownership" -- and rev-parse
+            # returns non-zero, which this function read as "not a git
+            # repository" and skipped the commit.
+            #
+            # The first live run hit exactly that: the page was written and
+            # then never committed or pushed, so no member could read the thing
+            # the run had just paid to produce. The warning claimed the vault
+            # was not a repository, which was untrue and would have sent any
+            # diagnosis in the wrong direction.
+            #
+            # Scoped to this one path with -c rather than a global config, so
+            # it grants nothing beyond the directory the operator already
+            # pointed the bot at.
+            ["git", "-c", f"safe.directory={vault_dir}", "-C", str(vault_dir), *args],
             capture_output=True, text=True, check=False,
         )
 
-    if run("rev-parse", "--git-dir").returncode != 0:
-        log.warning("vault is not a git repository; skipping commit")
+    probe = run("rev-parse", "--git-dir")
+    if probe.returncode != 0:
+        log.warning(
+            "vault is not a usable git repository; skipping commit",
+            extra={"git_stderr": probe.stderr.strip()[:200]},
+        )
         return False
 
     if not run("status", "--porcelain").stdout.strip():
