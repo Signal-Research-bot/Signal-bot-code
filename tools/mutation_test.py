@@ -145,6 +145,26 @@ MUTATIONS: tuple[Mutation, ...] = (
         "if ch.isdigit() and not ch.isascii():",
         "if False:",
     ),
+    # --- links: the class PRIVACY.md promises always leaves, and the ground
+    # truth that decides what anything downstream may act on -----------------
+    Mutation(
+        "profile links without a scheme pass through",
+        "        if SCHEMELESS_PERSONAL_RE.search(text):",
+        "        if False:",
+        REDACT,
+    ),
+    Mutation(
+        "a URL a later layer rewrote is still offered as ground truth",
+        "            kept_url_list=tuple(u for u in kept if u in out),",
+        "            kept_url_list=tuple(kept),",
+        REDACT,
+    ),
+    Mutation(
+        "redaction telemetry from quoted text is discarded",
+        "            self._count(quoted)",
+        "            pass",
+        TRANSCRIPT,
+    ),
     Mutation(
         "opt-out ignores who is being quoted",
         "if msg.quote_text and not is_opted_out(self.roster, msg.quote_author):",

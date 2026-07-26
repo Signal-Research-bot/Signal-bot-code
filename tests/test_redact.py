@@ -212,6 +212,65 @@ def test_messaging_deeplink_is_redacted(redactor):
     assert PLACEHOLDER_URL in redactor.redact("ping https://t.me/handle").text
 
 
+def test_a_profile_link_without_a_scheme_is_redacted(redactor):
+    """The form people actually paste. URL_RE requires https?://, so a bare
+    "linkedin.com/in/..." matched nothing and went to Anthropic intact -- the
+    one class of link PRIVACY.md promises is always removed."""
+    result = redactor.redact("he is at linkedin.com/in/someone-real")
+    assert "linkedin" not in result.text
+    assert PLACEHOLDER_URL in result.text
+    assert "personal-url-bare" in result.rules_fired
+
+
+def test_a_subdomain_does_not_evade_the_schemeless_rule(redactor):
+    assert "facebook" not in redactor.redact("m.facebook.com/groups/thing").text
+
+
+def test_a_bare_hostname_in_prose_is_not_a_link(redactor):
+    """The mandatory /path is the whole discriminator. Redacting the hostname
+    alone would blank ordinary prose about a company, which is over-redaction
+    of exactly the kind that gets a redactor switched off."""
+    text = "I deleted my facebook.com account last year"
+    assert redactor.redact(text).text == text
+
+
+def test_a_personal_host_inside_a_kept_url_is_left_alone(redactor):
+    """URL_RE has already decided about this link. Re-matching its path would
+    carve a hole in the middle of a research URL."""
+    url = "https://archive.invalid/mirror/t.me/thread"
+    result = redactor.redact(f"see {url}")
+    assert result.text == f"see {url}"
+
+
+def test_kept_urls_are_returned_as_strings_not_only_counted(redactor):
+    """Downstream needs the URL itself as ground truth, not a tally."""
+    url = "https://www.sec.gov/Archives/edgar/data/123/filing.htm"
+    result = redactor.redact(f"see {url}")
+    assert result.kept_url_list == (url,)
+
+
+def test_a_url_a_later_layer_rewrote_is_not_offered_as_ground_truth(redactor):
+    """The group-name and roster-name passes run AFTER the URL policy and will
+    happily rewrite the middle of a path. Such a URL was kept by the contextual
+    policy but did not survive to the transcript, so handing the whole thing on
+    would undo the redaction that shortened it."""
+    url = "https://example.invalid/Ravenhill/q3-report"
+    result = redactor.redact(f"see {url}")
+    assert url not in result.text
+    assert result.kept_urls == 1, "the contextual policy did keep it"
+    assert result.kept_url_list == (), "but nothing may act on it"
+
+
+def test_every_ground_truth_url_appears_verbatim_in_the_output(redactor):
+    """The invariant the fetch path depends on, asserted directly."""
+    result = redactor.redact(
+        "https://www.sec.gov/x Anna Smith linkedin.com/in/x "
+        "https://example.invalid/Ravenhill/y"
+    )
+    assert result.kept_url_list
+    assert all(url in result.text for url in result.kept_url_list)
+
+
 def test_crypto_address_is_kept_but_counted(redactor):
     """In a crypto research group an address is usually the subject, not identity."""
     addr = "0x" + "a" * 40

@@ -252,6 +252,50 @@ def test_a_member_cannot_forge_a_speaker_turn(builder):
     assert "member Z" in line
 
 
+# --- ground truth for anything that may act on a link -------------------------
+
+
+def test_a_kept_link_is_offered_as_ground_truth_verbatim(builder):
+    """A link is fetchable only if it survived redaction into a line, exactly
+    as written. Membership of this set is what makes a mangled or invented URL
+    unusable downstream rather than merely unlikely."""
+    url = "https://www.sec.gov/Archives/edgar/data/123/filing.htm"
+    line = builder.line(msg(f"source: {url}"))
+    assert url in line
+    assert builder.kept_urls_set == {url}
+
+
+def test_a_link_that_only_appears_in_a_quote_is_never_fetchable(builder):
+    """A quote is truncated to 120 characters AFTER redaction, so a URL inside
+    one can be a prefix of the real thing. Acting on a prefix is acting on a
+    different URL."""
+    url = "https://www.sec.gov/Archives/edgar/data/123/" + "a" * 90 + ".htm"
+    builder.line(msg("agreed", source=ALICE, quote_author=BOB,
+                     quote_text=f"see {url}"))
+    assert builder.kept_urls_set == set()
+    assert builder.stats.kept_urls == 1, "counted, not silently dropped"
+
+
+def test_a_link_in_a_dropped_message_is_never_fetchable(roster, tmp_path):
+    """The message never reached the transcript, so nothing may act on what
+    was inside it."""
+    b = Builder(
+        roster, PseudonymStore(KEY, tmp_path / "p.json"),
+        Redactor(roster=roster, sensitive_terms=frozenset({"diagnosis"})),
+    )
+    assert b.line(msg("diagnosis, see https://www.sec.gov/x")) is None
+    assert b.kept_urls_set == set()
+
+
+def test_redaction_telemetry_from_a_quote_is_counted(builder):
+    """Quoted text goes to Anthropic exactly like body text does, but its
+    rules_fired, kept_urls and kept_addresses were discarded -- so a rule that
+    only ever fired on quotes read as a rule that never fired at all."""
+    builder.line(msg("agreed", source=ALICE, quote_author=BOB,
+                     quote_text="Anna Smith said so"))
+    assert any(r.startswith("roster-name") for r in builder.stats.redaction_rules)
+
+
 def test_defanging_does_not_damage_a_real_mention(builder):
     """The first version of the fix rewrote every "Participant X", which broke
     legitimate mentions. Allocated labels must survive untouched."""

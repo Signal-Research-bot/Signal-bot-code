@@ -19,9 +19,12 @@ Everything crossing the network to Anthropic, and everything coming back before 
 - Signal ACI / PNI UUIDs, any UUID shape
 - member names, nicknames, profile names, `@mentions` — NFKC-normalized, case-insensitive, including possessives, diminutives, inflections and known misspellings
 - the group name and the groupId
-- email addresses, crypto addresses, links to member profiles or socials
+- email addresses and IBANs
+- links to member profiles or socials — **with or without a scheme**. `https://linkedin.com/in/x` and the bare `linkedin.com/in/x` people actually paste are the same disclosure; only the first was ever caught. A bare *hostname* in prose ("I deleted my facebook.com account") is not a link and is left alone — the `/path` is the discriminator.
 - attachment filenames
 - millisecond-precision timestamps (round to 15 minutes; ms timestamp + message length is a near-perfect join key against anyone else's copy of the chat)
+
+**Deliberately kept, and counted rather than blocked:** research URLs and on-chain addresses. In a chat about crypto and company filings a treasury address or an EDGAR link is the *substance*, and blanket redaction would gut the product while adding almost nothing — so `redact.py` keeps them, records a per-run count (`kept_urls`, `kept_addresses`) so the operator can see the rate this judgement is running at, and hands the surviving URL strings on as ground truth (`kept_url_list`). This is the one place the policy is contextual rather than categorical; do not extend that reasoning to any class above.
 
 **Must be true of every outbound request:**
 

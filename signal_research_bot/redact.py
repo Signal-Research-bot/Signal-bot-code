@@ -101,6 +101,29 @@ UUID_COMPACT_RE = re.compile(r"(?<![0-9a-zA-Z])[0-9a-f]{32}(?![0-9a-zA-Z])", re.
 # common unspaced form, whose tail is not a multiple of four.
 IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]){11,30}\b")
 URL_RE = re.compile(r"https?://[^\s<>\"')]+", re.I)
+
+# The same personal hosts, written the way people actually paste them:
+# "linkedin.com/in/someone", no scheme. URL_RE requires https?:// and never saw
+# this form, so a profile link typed without a scheme went to Anthropic intact
+# -- the one class of link PRIVACY.md promises is always removed.
+#
+# The mandatory `/path` is the whole discriminator. Matching the bare hostname
+# would redact "I deleted my facebook.com account", which is prose about a
+# person, not an identifier for one; requiring a path keeps that untouched while
+# catching every form that actually resolves to somebody's profile.
+#
+# The lookbehind stops this re-matching inside something an earlier layer
+# already decided about: a kept research URL whose path or query happens to
+# contain a personal host, and the domain half of an address the email rule has
+# already replaced.
+_PERSONAL_HOST_ALT = "|".join(
+    re.escape(h) for h in sorted(PERSONAL_HOSTS, key=len, reverse=True)
+)
+SCHEMELESS_PERSONAL_RE = re.compile(
+    rf"(?<![\w@/.])(?:[\w-]+\.)*(?:{_PERSONAL_HOST_ALT})/[^\s<>\"')]+",
+    re.I,
+)
+
 BTC_RE = re.compile(r"\b(?:bc1[a-z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b")
 ETH_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 
@@ -267,6 +290,18 @@ class RedactionResult:
     # Counted-but-kept classes, for human review of the contextual policy.
     kept_urls: int = 0
     kept_addresses: int = 0
+    # The kept URLs themselves, and not merely how many there were.
+    #
+    # This is ground truth, with one invariant that the rest of the system
+    # relies on: **every string in here appears verbatim in `text`**. A URL that
+    # a later layer rewrote -- a roster name inside its path, a personal host in
+    # its query string -- is counted in `kept_urls` but is NOT listed here,
+    # because handing it on whole would undo the redaction that shortened it.
+    #
+    # So this can legitimately be shorter than `kept_urls`. Anything that needs
+    # a URL it may act on wants this list; anything reporting on the contextual
+    # policy wants the count.
+    kept_url_list: tuple[str, ...] = ()
 
 
 @dataclass
@@ -374,25 +409,29 @@ class Redactor:
                 text = pattern.sub(placeholder, text)
         return text
 
-    def _contextual(self, text: str, fired: list[str]) -> tuple[str, int, int]:
+    def _contextual(self, text: str, fired: list[str]) -> tuple[str, list[str], int]:
         """Redact identity-bearing links; keep and count research payload."""
-        kept_urls = 0
+        kept: list[str] = []
 
         def url_sub(m: re.Match[str]) -> str:
-            nonlocal kept_urls
             url = m.group()
             host = re.sub(r"^www\.", "", url.split("//", 1)[-1].split("/")[0].lower())
             personal = any(host == h or host.endswith("." + h) for h in PERSONAL_HOSTS)
             if personal:
                 fired.append("personal-url")
                 return PLACEHOLDER_URL
-            kept_urls += 1
+            kept.append(url)
             return url
 
         text = URL_RE.sub(url_sub, text)
+        # Runs after URL_RE, so every scheme-bearing link has already been
+        # decided on and this pass only sees the bare form.
+        if SCHEMELESS_PERSONAL_RE.search(text):
+            fired.append("personal-url-bare")
+            text = SCHEMELESS_PERSONAL_RE.sub(PLACEHOLDER_URL, text)
         # Addresses are kept (research payload) but counted for review.
         kept_addresses = len(BTC_RE.findall(text)) + len(ETH_RE.findall(text))
-        return text, kept_urls, kept_addresses
+        return text, kept, kept_addresses
 
     # -- entry point ----------------------------------------------------------
 
@@ -429,7 +468,7 @@ class Redactor:
         fired: list[str] = []
         out = self._strip_simple(text, fired)
         out = self._strip_phones(out, fired)
-        out, kept_urls, kept_addresses = self._contextual(out, fired)
+        out, kept, kept_addresses = self._contextual(out, fired)
 
         if self.roster.group_name:
             pattern = re.compile(rf"(?<!\w){re.escape(self.roster.group_name)}(?!\w)", re.I)
@@ -442,6 +481,11 @@ class Redactor:
         return RedactionResult(
             text=out,
             rules_fired=tuple(fired),
-            kept_urls=kept_urls,
+            kept_urls=len(kept),
             kept_addresses=kept_addresses,
+            # Filtered against the FINAL text, not against what _contextual saw.
+            # The group-name and roster-name passes run after it and will happily
+            # rewrite the middle of a URL, so a URL that was kept there is not
+            # necessarily a URL that survived to here. See kept_url_list.
+            kept_url_list=tuple(u for u in kept if u in out),
         )

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 from .envelope import ParsedMessage, substitute_mentions
 from .identity import PseudonymStore, Roster, is_opted_out
-from .redact import Redactor, is_only_placeholders
+from .redact import RedactionResult, Redactor, is_only_placeholders
 
 UNKNOWN_LABEL = "[participant]"
 
@@ -67,11 +67,27 @@ class Builder:
     pseudonyms: PseudonymStore
     redactor: Redactor
     stats: TranscriptStats = field(default_factory=TranscriptStats)
+    # Every URL that survived redaction into a transcript LINE, verbatim. This
+    # is the ground truth for anything downstream that may act on a link: a URL
+    # is fetchable only if it is in here, so a model that mangles or invents one
+    # simply fails the membership test rather than being believed.
+    #
+    # Body path only. Quoted text is truncated to 120 characters after
+    # redaction, so a URL inside a quote may be a prefix of the real one -- and
+    # a truncated URL must never be fetchable.
+    kept_urls_set: set[str] = field(default_factory=set)
 
     def _label(self, aci: str | None) -> str:
         if not aci:
             return UNKNOWN_LABEL
         return self.pseudonyms.label(aci)
+
+    def _count(self, result: RedactionResult) -> None:
+        """Fold one redaction pass into the run's telemetry."""
+        for rule in result.rules_fired:
+            self.stats.redaction_rules[rule] = self.stats.redaction_rules.get(rule, 0) + 1
+        self.stats.kept_urls += result.kept_urls
+        self.stats.kept_addresses += result.kept_addresses
 
     def _defang(self, text: str) -> str:
         """Defuse prompt-structure tokens in attacker-controlled message text.
@@ -130,10 +146,8 @@ class Builder:
             self.stats.dropped_empty += 1
             return None
 
-        for rule in result.rules_fired:
-            self.stats.redaction_rules[rule] = self.stats.redaction_rules.get(rule, 0) + 1
-        self.stats.kept_urls += result.kept_urls
-        self.stats.kept_addresses += result.kept_addresses
+        self._count(result)
+        self.kept_urls_set.update(result.kept_url_list)
         self.stats.included += 1
 
         speaker = self._label(msg.source)
@@ -144,6 +158,12 @@ class Builder:
         # the top only sees the *replier*. PRIVACY.md promises this explicitly.
         if msg.quote_text and not is_opted_out(self.roster, msg.quote_author):
             quoted = self.redactor.redact(msg.quote_text)
+            # Counted unconditionally, and before the drop check. Quoted text
+            # goes to Anthropic exactly like body text does, but its redaction
+            # telemetry used to be thrown away -- so a rule that only ever fired
+            # on quotes read as a rule that never fired at all, and a run where
+            # every kept link came through a quote reported zero kept links.
+            self._count(quoted)
             if not quoted.dropped and quoted.text.strip():
                 prefix = f"(replying to: {self._defang(quoted.text.strip()[:120])}) "
         elif msg.quote_text:
