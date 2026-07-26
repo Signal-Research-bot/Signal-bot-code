@@ -63,6 +63,11 @@ class FakeClient:
     responses: dict[str, Any] = field(default_factory=dict)
     calls: list[str] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    # What the SEARCH TOOL "returned", per stage. Deliberately separate from
+    # the model's own `sources` array so a test can make them disagree -- which
+    # is the whole point of the grounding control.
+    search_results: dict[str, set] = field(default_factory=dict)
+    last_retrieved_urls: set = field(default_factory=set)
 
     def _stage_of(self, request: dict) -> str:
         """Identify the stage from its prompt.
@@ -81,6 +86,7 @@ class FakeClient:
     def _resolve(self, request: dict):
         stage = self._stage_of(request)
         self.calls.append(stage)
+        self.last_retrieved_urls = set(self.search_results.get(stage, set()))
         value = self.responses.get(stage)
         if isinstance(value, Exception):
             raise value
@@ -258,11 +264,12 @@ def test_a_refusal_is_counted_not_fatal(env, monkeypatch):
 def test_ungrounded_citations_are_dropped_from_the_record(env, monkeypatch):
     """A URL the search never returned is a fabrication, and a fabricated
     citation in a sourced archive is worse than no entry."""
-    client = FakeClient({
-        "extract": extracted(), "triage": triaged(),
-        "cheap": cheap(urls=("https://real.example", "https://also-real.example")),
-        "format": record(urls=("https://real.example", "https://invented.example")),
-    })
+    client = FakeClient(
+        {"extract": extracted(), "triage": triaged(),
+         "cheap": cheap(urls=("https://real.example", "https://also-real.example")),
+         "format": record(urls=("https://real.example", "https://invented.example"))},
+        search_results={"cheap": {"https://real.example", "https://also-real.example"}},
+    )
     install(monkeypatch, client)
     batch_mod.run(cfg_for(env))
     written = next((env / "vault" / "Research Log").glob("*.md")).read_text(encoding="utf-8")
@@ -331,3 +338,54 @@ def test_the_domain_actually_reaches_the_model(env, monkeypatch):
     install(monkeypatch, client)
     batch_mod.run(cfg_for(env, research_domain="UNIQUE-DOMAIN-MARKER"))
     assert "UNIQUE-DOMAIN-MARKER" in seen.get("extract", "")
+
+
+# --- grounding: the allowlist must come from the search tool -------------------
+
+
+def test_a_url_the_model_invented_is_rejected(env, monkeypatch):
+    """The control's whole purpose, and it was circular until an audit.
+
+    The model's own `sources` array claims a URL the search tool never
+    returned. If the allowlist were built from that array it would validate
+    itself. It must be built from the search results instead.
+    """
+    client = FakeClient(
+        {"extract": extracted(), "triage": triaged(),
+         "cheap": cheap(urls=("https://invented.example", "https://also-fake.example")),
+         "format": record(urls=("https://invented.example",))},
+        search_results={"cheap": {"https://real.example"}},
+    )
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env))
+    written = next((env / "vault" / "Research Log").glob("*.md")).read_text(encoding="utf-8")
+    assert "invented.example" not in written
+
+
+def test_a_url_the_search_returned_is_kept(env, monkeypatch):
+    client = FakeClient(
+        {"extract": extracted(), "triage": triaged(),
+         "cheap": cheap(urls=("https://real.example", "https://real2.example")),
+         "format": record(urls=("https://real.example",))},
+        search_results={"cheap": {"https://real.example", "https://real2.example"}},
+    )
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env))
+    written = next((env / "vault" / "Research Log").glob("*.md")).read_text(encoding="utf-8")
+    assert "real.example" in written
+
+
+def test_escalated_tasks_keep_their_own_citations(env, monkeypatch):
+    """Regression: `allowed` was built only from the cheap pass, so every
+    source found by the deep stage was stripped from the written entry."""
+    client = FakeClient(
+        {"extract": extracted(), "triage": triaged(),
+         "cheap": cheap(resolved=False), "deep": "deep text",
+         "format": record(urls=("https://found-by-opus.example",))},
+        search_results={"cheap": {"https://cheap-only.example"},
+                        "deep": {"https://found-by-opus.example"}},
+    )
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env))
+    written = next((env / "vault" / "Research Log").glob("*.md")).read_text(encoding="utf-8")
+    assert "found-by-opus.example" in written, "the deep stage's own sources were stripped"

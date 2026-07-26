@@ -92,6 +92,10 @@ class Client:
     quarantine_dir: Path
     transport: Transport
     usage: Usage = field(default_factory=Usage)
+    # URLs the search tool returned on the most recent call. Read straight
+    # after a search stage; this is the ONLY legitimate source for the
+    # citation allowlist. See retrieved_urls() for why.
+    last_retrieved_urls: set[str] = field(default_factory=set)
 
     def send(self, **request: Any) -> tuple[str, Usage]:
         """One request. Returns (text, usage). Raises before sending if unsafe."""
@@ -114,6 +118,7 @@ class Client:
 
         usage = _usage_of(response)
         self.usage.add(usage)
+        self.last_retrieved_urls = retrieved_urls(response)
 
         text = _text_of(response)
         # The model can echo back what it was given, and this text is about to
@@ -149,6 +154,33 @@ def _text_of(response: Any) -> str:
         if getattr(block, "type", None) == "text":
             parts.append(block.text)
     return "\n".join(parts)
+
+
+def retrieved_urls(response: Any) -> set[str]:
+    """URLs the SEARCH TOOL actually returned, read from the response blocks.
+
+    This is the ground truth for citation checking, and it must come from
+    `web_search_tool_result` blocks rather than from anything the model wrote.
+
+    An audit caught the original version doing the latter: the allowlist was
+    built from the `sources` array in the model's own structured output, then
+    used to validate the `evidence` array in the model's own structured output.
+    A fabricated URL appears in both, so it validated itself. The control read
+    as structural and was circular.
+    """
+    urls: set[str] = set()
+    for block in getattr(response, "content", None) or []:
+        if getattr(block, "type", "") != "web_search_tool_result":
+            continue
+        content = getattr(block, "content", None)
+        # An error block has a single object here, not a list of results.
+        if not isinstance(content, (list, tuple)):
+            continue
+        for result in content:
+            url = getattr(result, "url", None)
+            if url:
+                urls.add(url.strip())
+    return urls
 
 
 def _usage_of(response: Any) -> Usage:

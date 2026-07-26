@@ -129,5 +129,11 @@ services:
       SRB_NOTIFY: ${SRB_NOTIFY:-false}
       SRB_KB_DIR: /vault
       SRB_VAR_DIR: /app/var
+      # keyring has no backend inside a Linux container, so the credential
+      # store the host uses is unavailable here. A separate key file is the
+      # supported container path -- separate from .env on purpose, so the
+      # cache key and the pseudonym key are never in one place.
+      SRB_PSEUDONYM_KEY_FILE: /app/var/pseudonym.key
+      SRB_FOREIGN_VAULT_DIR: ${SRB_FOREIGN_VAULT_DIR:-}
     logging: *logging
     command: ["python", "-m", "signal_research_bot.batch"]

@@ -24,6 +24,7 @@ roster.yml
 roster.yaml
 roster.json
 pseudonyms.json
+pseudonym.key
 
 # --- Signal state: linked-device identity keys. Never commit, never bind-mount
 # into the repo tree. Lives in a Docker named volume; this is belt-and-braces.

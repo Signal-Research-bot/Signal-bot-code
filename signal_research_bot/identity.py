@@ -33,6 +33,7 @@ from typing import Iterable
 SERVICE = "signal-research-bot"
 KEY_NAME = "pseudonym-key"
 KEY_ENV = "SRB_PSEUDONYM_KEY"          # hex; CI and tests only
+KEY_FILE_ENV = "SRB_PSEUDONYM_KEY_FILE"  # path; the container path (see below)
 INTERNAL_ID_CHARS = 12                 # 48 bits of the HMAC: ample, and short
 
 
@@ -56,19 +57,53 @@ def _keyring():
     return keyring
 
 
+def _parse_key(raw: str, source: str) -> bytes:
+    try:
+        key = bytes.fromhex(raw.strip())
+    except ValueError as exc:
+        raise KeyUnavailable(f"{source} is not valid hex") from exc
+    if len(key) < 32:
+        raise KeyUnavailable(f"{source} must be at least 32 bytes of hex")
+    return key
+
+
 def load_or_create_key(*, allow_create: bool = True) -> bytes:
     """Return the 32-byte pseudonym key, creating it on first use.
 
-    Resolution order: SRB_PSEUDONYM_KEY, then the OS credential store.
+    Resolution order: SRB_PSEUDONYM_KEY, then a key file, then the OS
+    credential store.
+
+    The credential store is the strongest option and the right one when the
+    pipeline runs on the host. It does NOT survive containerisation: keyring
+    has no usable backend inside a Linux container, so the batch job would
+    raise NoKeyringError and never run. An audit caught this before the first
+    live run.
+
+    The key file is therefore the supported container path. It is deliberately
+    a SEPARATE file from .env: the point of the split is that an attacker who
+    obtains the message cache does not thereby obtain the means to undo the
+    pseudonyms, and putting both in one file would defeat exactly that. It is
+    weaker than the credential store -- a file is a file -- and that trade is
+    stated here rather than hidden.
     """
     env = os.environ.get(KEY_ENV)
     if env:
+        return _parse_key(env, KEY_ENV)
+
+    key_file = os.environ.get(KEY_FILE_ENV, "").strip()
+    if key_file:
+        path = Path(key_file)
+        if path.exists():
+            return _parse_key(path.read_text(encoding="utf-8"), path.name)
+        if not allow_create:
+            raise KeyUnavailable(f"{path.name} does not exist and creation is disabled")
+        key = secrets.token_bytes(32)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(key.hex(), encoding="utf-8")
         try:
-            key = bytes.fromhex(env.strip())
-        except ValueError as exc:
-            raise KeyUnavailable(f"{KEY_ENV} is not valid hex") from exc
-        if len(key) < 32:
-            raise KeyUnavailable(f"{KEY_ENV} must be at least 32 bytes of hex")
+            path.chmod(0o600)          # no-op on Windows; meaningful in the container
+        except OSError:
+            pass
         return key
 
     kr = _keyring()

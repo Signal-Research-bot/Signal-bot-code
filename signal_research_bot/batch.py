@@ -117,10 +117,15 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         question = task["question"]
         try:
             cheap = None
+            # Ground truth for citations: what the SEARCH TOOL returned, not
+            # what the model wrote in its own `sources` array. Accumulated
+            # across every search stage this task runs.
+            allowed: set[str] = set()
             try:
                 cheap, _ = client.send_json(
                     **stages.cheap_research(question, task.get("rationale", ""))
                 )
+                allowed |= client.last_retrieved_urls
                 stats["cheap_attempted"] += 1
                 if cheap.get("resolved"):
                     stats["cheap_resolved"] += 1
@@ -134,10 +139,11 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
                 research_text, _ = client.send(
                     **stages.deep_research(question, why, notes)
                 )
-                allowed = allowed_urls(cheap)
+                # Without this the deep stage's own citations were never
+                # harvested, so an escalated task had every source stripped.
+                allowed |= client.last_retrieved_urls
             else:
                 research_text = cheap["answer"]
-                allowed = allowed_urls(cheap)
 
             record, _ = client.send_json(
                 **stages.format_record(question, research_text, allowed)

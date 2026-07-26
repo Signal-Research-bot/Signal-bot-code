@@ -1,0 +1,16 @@
+# Build context hygiene. compose builds from the repo root, so without this
+# .env, the key file, the roster, the message cache and SETUP.md are all
+# uploaded to the daemon and can land in an image layer.
+.env
+.env.*
+!.env.example
+var/
+SETUP.md
+.git/
+.venv/
+**/__pycache__/
+*.db
+*.db-wal
+*.db-shm
+*.local
+*.key
