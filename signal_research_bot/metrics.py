@@ -4,9 +4,10 @@ Mostly counts and token usage. This file answers "is the gate set right, and
 what is this costing".
 
 **It is NOT safe to paste into an issue.** It used to say it was, and that held
-until `deferred_questions` and `unfinished_questions` were added so a task
-dropped by the cap or lost to a failure could be re-raised rather than vanish.
-Those are model-restated questions derived from the conversation -- exactly the
+until `deferred_questions`, `unfinished_questions` and `collided_questions` were
+added so a task dropped by the cap, lost to a failure, or researched into a
+filename another page already held could be re-raised rather than vanish. Those
+are model-restated questions derived from the conversation -- exactly the
 content this file had promised to exclude. Keeping them is the better trade, a
 silently discarded question being worse, but the promise has to change with the
 data rather than outlive it.

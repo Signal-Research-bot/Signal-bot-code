@@ -127,7 +127,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         "transcript": builder.stats.as_dict(),
         "cheap_attempted": 0, "cheap_resolved": 0, "escalated": 0,
         "written": 0, "failed": 0, "ungrounded_dropped": 0, "refusals": 0,
-        "unsourced_dropped": 0,
+        "unsourced_dropped": 0, "not_written_collision": 0,
         # What the roster actually covered. Recorded because an empty roster no
         # longer refuses to run: without this, a window with no deny-list at all
         # would look identical in the metrics to a fully covered one.
@@ -258,7 +258,22 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
             record.setdefault("title", title_for(question, month))
             stem, markdown = render(record, first_raised=today, last_verified=today)
             if vault:
-                vault.write(stem, markdown)
+                result = vault.write(stem, markdown)
+                if not result.wrote:
+                    # The research happened and is not in the vault. Counting it
+                    # as written -- which this did unconditionally until the
+                    # writer learned to report an outcome -- committed a page
+                    # that was never created and announced it to the group.
+                    stats["not_written_collision"] += 1
+                    # Same reasoning as deferred_questions: the window is
+                    # consumed at the end of this run, so without the question
+                    # itself there is nothing left to research from.
+                    stats.setdefault("collided_questions", []).append(question)
+                    log.error(
+                        "entry not filed: an entry with this name already exists",
+                        extra={"stem": stem, "outcome": result.outcome.value},
+                    )
+                    continue
                 stats["written"] += 1
                 # Depersonalised again here rather than reusing the rendered
                 # record: this text is broadcast back into the Signal group, and

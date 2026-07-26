@@ -18,7 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from signal_research_bot.kb.render import (  # noqa: E402
     frontmatter, render, slug, title_for,
 )
-from signal_research_bot.kb.writer import VaultError, VaultWriter, git_commit  # noqa: E402
+from signal_research_bot.kb.writer import (  # noqa: E402
+    VaultError, VaultWriter, WriteOutcome, git_commit,
+)
 
 
 def record(**kw) -> dict:
@@ -125,9 +127,51 @@ def vault(tmp_path):
 
 def test_writes_into_its_own_subdirectory(vault):
     w = VaultWriter(vault)
-    path = w.write("Research - a - 2026-07", "# a")
-    assert path.parent.name == "Research Log"
-    assert path.read_text(encoding="utf-8") == "# a"
+    result = w.write("Research - a - 2026-07", "# a")
+    assert result.path.parent.name == "Research Log"
+    assert result.path.read_text(encoding="utf-8") == "# a"
+
+
+# --- what a write reports back ------------------------------------------------
+#
+# The writer used to return a Path whether it wrote or skipped, so the caller
+# could not tell the difference and counted both as written. A discarded page
+# was committed and announced to the group as a new entry.
+
+
+def test_write_reports_that_it_created_the_file(vault):
+    result = VaultWriter(vault).write("r", "body")
+    assert result.outcome is WriteOutcome.CREATED
+    assert result.wrote is True
+
+
+def test_a_second_distinct_record_is_reported_as_a_collision_not_a_write(vault):
+    """The regression. Two different findings, one filename: the second is not
+    written, and the caller must be able to see that it was not."""
+    w = VaultWriter(vault)
+    w.write("r", "the first finding")
+    result = w.write("r", "a completely different finding")
+    assert result.outcome is WriteOutcome.COLLIDED
+    assert result.wrote is False
+    assert result.path.read_text(encoding="utf-8") == "the first finding"
+
+
+def test_an_identical_rewrite_is_reported_as_unchanged_not_a_collision(vault):
+    """A crashed batch re-running is not data loss, and must not be reported as
+    though it were -- or every benign re-run cries wolf."""
+    w = VaultWriter(vault)
+    w.write("r", "same bytes")
+    result = w.write("r", "same bytes")
+    assert result.outcome is WriteOutcome.UNCHANGED
+    assert result.wrote is False
+
+
+def test_explicit_overwrite_reports_replaced(vault):
+    w = VaultWriter(vault)
+    w.write("r", "original")
+    result = w.write("r", "replacement", overwrite=True)
+    assert result.outcome is WriteOutcome.REPLACED
+    assert result.wrote is True
 
 
 def test_does_not_overwrite_an_existing_record(vault):

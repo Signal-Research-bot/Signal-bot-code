@@ -39,6 +39,8 @@ IDENTITY = REPO_ROOT / "signal_research_bot" / "identity.py"
 REDACT = REPO_ROOT / "signal_research_bot" / "redact.py"
 RECEIVER = REPO_ROOT / "signal_research_bot" / "receiver.py"
 IMPORTER = REPO_ROOT / "signal_research_bot" / "importer.py"
+WRITER = REPO_ROOT / "signal_research_bot" / "kb" / "writer.py"
+BATCH = REPO_ROOT / "signal_research_bot" / "batch.py"
 SUITE = (
     "tests/test_egress.py tests/test_client.py tests/test_transcript.py "
     "tests/test_envelope.py tests/test_redact.py tests/test_kb.py "
@@ -175,6 +177,27 @@ MUTATIONS: tuple[Mutation, ...] = (
         'f"title: {_yaml_str(title)}",',
         'f"title: {title}",',
         RENDER,
+    ),
+    # --- research that was researched but never filed -------------------------
+    # The claim these defend: the batch counts, commits and announces only the
+    # pages that actually reached the vault.
+    Mutation(
+        "the writer cannot tell a skip from a write",
+        "            return WriteResult(path, WriteOutcome.COLLIDED)",
+        "            return WriteResult(path, WriteOutcome.CREATED)",
+        WRITER,
+    ),
+    Mutation(
+        "a distinct record silently overwrites the page already there",
+        "        if path.exists() and not overwrite:",
+        "        if False:",
+        WRITER,
+    ),
+    Mutation(
+        "an unwritten record is counted and announced again",
+        "                if not result.wrote:",
+        "                if False:",
+        BATCH,
     ),
     # --- keeping participants out of the research itself ---------------------
     Mutation(

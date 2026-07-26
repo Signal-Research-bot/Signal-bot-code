@@ -183,6 +183,17 @@ def test_summary_ends_with_the_automation_disclosure():
     assert fallback.endswith("not typed by hand.")
 
 
+def test_a_window_whose_only_outcome_was_a_collision_still_posts():
+    """Silence is exactly what the collision reporting exists to end."""
+    assert format_summary({"written": 0, "not_written_collision": 1}, []) is not None
+
+
+def test_a_collision_is_reported_as_not_filed_rather_than_as_a_new_entry():
+    text = format_summary({"written": 0, "not_written_collision": 2}, [])
+    assert "2 finding(s) could not be filed" in text
+    assert "nothing was overwritten" in text
+
+
 def test_deferred_leads_are_not_promised_to_run_later():
     """The gate logs deferrals; nothing re-queues them. The summary must not
     claim otherwise."""

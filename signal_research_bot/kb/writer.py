@@ -18,6 +18,7 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -27,6 +28,32 @@ RESEARCH_SUBDIR = "Research Log"
 
 class VaultError(RuntimeError):
     """A write was refused."""
+
+
+class WriteOutcome(str, Enum):
+    """What a write actually did.
+
+    `UNCHANGED` and `COLLIDED` both mean "the file was not written", and the
+    distinction between them is the point: one is a crashed batch re-running
+    harmlessly, the other is two different findings competing for one filename
+    and the second being discarded. Reported as one outcome, the caller either
+    cries wolf on every benign re-run or stays silent on real loss.
+    """
+
+    CREATED = "created"      # nothing was there; written
+    REPLACED = "replaced"    # existed, overwrite=True, written
+    UNCHANGED = "unchanged"  # existed, byte-identical; nothing lost
+    COLLIDED = "collided"    # existed with DIFFERENT content; NOT written
+
+
+@dataclass(frozen=True)
+class WriteResult:
+    path: Path
+    outcome: WriteOutcome
+
+    @property
+    def wrote(self) -> bool:
+        return self.outcome in (WriteOutcome.CREATED, WriteOutcome.REPLACED)
 
 
 @dataclass
@@ -59,22 +86,36 @@ class VaultWriter:
             raise VaultError("refusing to write outside the research subdirectory")
         return path
 
-    def write(self, stem: str, markdown: str, *, overwrite: bool = False) -> Path:
-        """Write one record atomically. Returns the path written."""
+    def write(self, stem: str, markdown: str, *, overwrite: bool = False) -> WriteResult:
+        """Write one record atomically. Returns what actually happened.
+
+        The outcome is RETURNED rather than only logged, because the caller has
+        to be able to tell a write from a skip. It could not: batch.py counted
+        every call as written, committed it, and announced it to the group -- so
+        a page that was silently discarded was reported to the group as a new
+        entry, which is how a real finding was lost once already.
+        """
         self.target_dir.mkdir(parents=True, exist_ok=True)
         path = self._resolve(stem)
 
         if path.exists() and not overwrite:
             # Idempotency: a re-run of a crashed batch must not duplicate or
             # clobber. Supersession is an explicit operation, not a side effect.
-            log.info("record already exists; skipping", extra={"path": path})
-            return path
+            if path.read_text(encoding="utf-8") == markdown:
+                log.info("record already present and identical", extra={"path": path})
+                return WriteResult(path, WriteOutcome.UNCHANGED)
+            log.error(
+                "record NOT written: a different page already holds this name",
+                extra={"path": path},
+            )
+            return WriteResult(path, WriteOutcome.COLLIDED)
 
+        outcome = WriteOutcome.REPLACED if path.exists() else WriteOutcome.CREATED
         tmp = path.with_suffix(".md.tmp")
         tmp.write_text(markdown, encoding="utf-8", newline="\n")
         os.replace(tmp, path)
         log.info("record written", extra={"path": path, "bytes": len(markdown)})
-        return path
+        return WriteResult(path, outcome)
 
     def digest(self, limit: int = 400) -> str:
         """A compact index of existing entries, for the triage stage.

@@ -507,6 +507,53 @@ def test_a_failed_task_leaves_its_question_behind(env, monkeypatch):
     assert '"unfinished_questions": ["q0"]' in line
 
 
+# --- research that could not be filed -----------------------------------------
+#
+# Two tasks whose records carry the same title render to the same filename. The
+# writer will not clobber the first, so the second is not written -- and the
+# batch used to count it as written anyway, commit it, and announce it.
+
+
+def _colliding(env, monkeypatch, **cfg_kw):
+    """Two researched tasks, one filename. Same title, different answers."""
+    client = FakeClient(
+        {"extract": extracted(n=2), "triage": triaged(n=2), "cheap": cheap(),
+         "format": lambda n: dict(record(), answer=f"answer number {n}")},
+        search_results={"cheap": {"https://a.example"}},
+    )
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env, **cfg_kw))
+    return client
+
+
+def test_a_record_that_could_not_be_filed_is_never_counted_as_written(env, monkeypatch):
+    _colliding(env, monkeypatch)
+    line = (env / "metrics.jsonl").read_text(encoding="utf-8")
+    assert '"written": 1' in line, "the discarded entry was counted as written"
+    assert '"not_written_collision": 1' in line
+    assert len(list((env / "vault" / "Research Log").glob("*.md"))) == 1
+
+
+def test_a_record_that_could_not_be_filed_is_not_announced_to_the_group(env, monkeypatch):
+    """The group was told about a page that does not exist."""
+    posted: list[list] = []
+    monkeypatch.setattr(
+        batch_mod.Notifier, "summarise_run",
+        lambda self, stats, entries: posted.append(entries) or True,
+    )
+    _colliding(env, monkeypatch, notify=True)
+    assert len(posted) == 1
+    assert len(posted[0]) == 1, "an unwritten entry was announced as a new finding"
+
+
+def test_a_record_that_could_not_be_filed_leaves_its_question_behind(env, monkeypatch):
+    """The window is consumed at the end of the run, so without the question
+    text the research is gone for good."""
+    _colliding(env, monkeypatch)
+    line = (env / "metrics.jsonl").read_text(encoding="utf-8")
+    assert '"collided_questions": ["q1"]' in line
+
+
 # --- learning handles by watching --------------------------------------------
 
 

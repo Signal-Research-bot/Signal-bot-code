@@ -186,7 +186,8 @@ def format_summary(
     """
     written = stats.get("written", 0)
     deferred = stats.get("deferred_over_cap", 0)
-    if not written and not deferred:
+    collided = stats.get("not_written_collision", 0)
+    if not written and not deferred and not collided:
         return None
 
     body: list[str] = []
@@ -219,6 +220,13 @@ def format_summary(
         # summary must not promise what the gate does not do.
         tail.append(
             f"{deferred} lead(s) deferred by the per-run cap; logged for manual follow-up."
+        )
+    if collided:
+        # The research exists and the page does not. Says so plainly, and does
+        # not promise a retry -- same discipline as the deferred line.
+        tail.append(
+            f"{collided} finding(s) could not be filed: an entry with the same "
+            f"name already exists. Logged for manual follow-up; nothing was overwritten."
         )
     if stats.get("failed"):
         tail.append(f"{stats['failed']} task(s) failed and were skipped.")
