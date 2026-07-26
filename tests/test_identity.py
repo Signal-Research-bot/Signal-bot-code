@@ -175,3 +175,38 @@ def test_roster_round_trips_through_a_file(tmp_path):
     )
     roster = Roster.load(path)
     assert roster.names == ("Anna Smith",) and roster.opted_out == frozenset({BOB})
+
+
+def test_roster_template_is_rejected_until_edited(tmp_path):
+    """The shipped template must not load as-is.
+
+    Reads the real template rather than a fixture, so this fails if the two
+    ever drift -- a template whose placeholder no longer matches the guard is
+    worse than no guard, because it reintroduces the silent-success case it
+    exists to prevent.
+    """
+    template = Path(__file__).resolve().parent.parent / "roster.example.json"
+    assert template.exists(), "the roster template is missing"
+
+    target = tmp_path / "roster.json"
+    target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+    with pytest.raises(KeyUnavailable) as caught:
+        Roster.load(target)
+    assert "placeholder" in str(caught.value)
+
+
+def test_an_edited_roster_loads(tmp_path):
+    """The counterweight: the guard must not block a real roster."""
+    target = tmp_path / "roster.json"
+    target.write_text(
+        json.dumps({
+            "names": ["Anna Smith", "Annie"],
+            "phones": ["+" + "44" + "2079250918"],
+            "opted_out": [],
+            "group_name": "Ravenhill",
+        }),
+        encoding="utf-8",
+    )
+    roster = Roster.load(target)
+    assert "Annie" in roster.names
+    assert roster.group_name == "Ravenhill"

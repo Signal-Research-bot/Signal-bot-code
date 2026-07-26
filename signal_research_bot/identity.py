@@ -35,6 +35,9 @@ KEY_NAME = "pseudonym-key"
 KEY_ENV = "SRB_PSEUDONYM_KEY"          # hex; CI and tests only
 KEY_FILE_ENV = "SRB_PSEUDONYM_KEY_FILE"  # path; the container path (see below)
 INTERNAL_ID_CHARS = 12                 # 48 bits of the HMAC: ample, and short
+# Sentinel in roster.example.json. Kept in sync with that file by
+# test_roster_template_is_rejected_until_edited.
+PLACEHOLDER_MARKER = "REPLACE-ME"
 
 
 class KeyUnavailable(RuntimeError):
@@ -163,12 +166,33 @@ class Roster:
                 f"it: an empty deny-list silently redacts nothing."
             )
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return cls(
+        roster = cls(
             names=tuple(raw.get("names") or ()),
             phones=tuple(raw.get("phones") or ()),
             opted_out=frozenset(raw.get("opted_out") or ()),
             group_name=raw.get("group_name"),
         )
+        roster._reject_placeholders()
+        return roster
+
+    def _reject_placeholders(self) -> None:
+        """Refuse a roster still carrying template text.
+
+        The empty-roster check upstream is not enough. A roster copied from the
+        template and not edited is *non-empty*, so it passes every other check
+        and the pipeline runs at full speed while the deny-list protects nobody
+        -- which is indistinguishable from working until a real name turns up
+        in an outbound payload. Failing here makes that mistake loud.
+        """
+        values = [*self.names, *self.phones, self.group_name or ""]
+        for value in values:
+            if PLACEHOLDER_MARKER in value.upper():
+                raise KeyUnavailable(
+                    "the roster still contains template placeholder text "
+                    f"({PLACEHOLDER_MARKER!r}). Fill in var/roster.json with the "
+                    "group's real names, numbers and group name before running: "
+                    "an unedited roster redacts nothing while reporting success."
+                )
 
     def name_variants(self) -> set[str]:
         """Every surface form of a roster name that must be caught.

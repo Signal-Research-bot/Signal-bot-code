@@ -117,10 +117,16 @@ docker compose exec signal-cli \
   signal-cli --config /data listGroups
 ```
 
-**3. Fill in the roster** at `var/roster.json` (gitignored). This is the
-closed-world deny-list that redaction treats as its control — its accuracy
-matters more than any other single input. Include nicknames, common
-misspellings, and every phone number format people actually use.
+**3. Fill in the roster.** Copy [`roster.example.json`](roster.example.json) to
+`var/roster.json` (gitignored) and edit it. The file documents itself; the
+short version is that this is the closed-world deny-list redaction treats as
+its control, so its accuracy matters more than any other single input. Include
+nicknames and common misspellings — a member who is not listed is a member
+whose name can reach Anthropic.
+
+Copying rather than editing in place is deliberate. A roster still holding the
+example's `REPLACE-ME` values is *non-empty*, so it would pass every other
+check while protecting nobody; that case is rejected on load rather than run.
 
 **4. Start collecting.**
 
