@@ -181,3 +181,40 @@ services:
     # first paid call, so it failing was worse than an ordinary broken command.
     entrypoint: ["python", "-m", "signal_research_bot.batch"]
     command: []
+
+  # One-shot backfill from a Signal Android backup. See importer.py for how to
+  # produce the CSVs.
+  #
+  # This MUST run in a container, not on the host, and not only because .env is
+  # loaded by compose. The message cache lives in the `cache` named volume: a
+  # host run would create a second, empty database under var/ and import into
+  # that, leaving the real cache untouched while reporting success.
+  #
+  #   docker compose --profile import run --rm import --dry-run
+  #   docker compose --profile import run --rm import          # writes
+  import:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    profiles: ["import"]
+    networks: [internal]
+    volumes:
+      - cache:/cache
+      - ./var:/app/var
+      # Read-only, and supplied from .env so no host path appears in this
+      # published file. The export contains EVERY conversation on the account
+      # until the importer filters it, so it is mounted ro and nothing here
+      # ever writes back to it.
+      - ${SRB_IMPORT_DIR:-./var/import}:/import:ro
+    environment:
+      SRB_GROUP_ID: ${SRB_GROUP_ID:-}
+      SRB_CACHE_KEY: ${SRB_CACHE_KEY:?set SRB_CACHE_KEY in .env}
+      SRB_VAR_DIR: /app/var
+      SRB_PSEUDONYM_KEY_FILE: /app/var/pseudonym.key
+      SRB_LOG_LEVEL: ${SRB_LOG_LEVEL:-INFO}
+      # Deliberately absent: ANTHROPIC_API_KEY and SRB_KB_DIR. The importer only
+      # fills the cache. It makes no API call and writes nothing to the vault,
+      # so it is given neither the key nor the vault to reach them with.
+    logging: *logging
+    entrypoint: ["python", "-m", "signal_research_bot.importer", "--csv-dir", "/import"]
+    command: []
