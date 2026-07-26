@@ -23,6 +23,16 @@ from signal_research_bot.kb.writer import (  # noqa: E402
 )
 
 
+# Exactly these keys, in this order, and nothing else. Two tests read from this:
+# one asserts the list (the injection guarantee -- a title must not be able to
+# add a key), the other asserts the block's line count. Kept exact rather than a
+# subset check, and in one place so a schema change updates one literal.
+EXPECTED_FRONTMATTER_KEYS = [
+    "title", "entity_type", "topic_key", "research_status", "finding",
+    "confidence", "first_raised", "last_verified", "tags", "sources", "related",
+]
+
+
 def record(**kw) -> dict:
     base = {
         "title": "Research - are the reserves audited - 2026-07",
@@ -274,10 +284,7 @@ def test_a_newline_in_the_title_cannot_inject_frontmatter_keys():
 
     block = md.split("---")[1].strip()
     keys = [line.split(":")[0] for line in block.split("\n")]
-    assert keys == [
-        "title", "entity_type", "research_status", "finding", "confidence",
-        "first_raised", "last_verified", "tags", "sources", "related",
-    ]
+    assert keys == EXPECTED_FRONTMATTER_KEYS
     assert "source_path" not in keys and "cssclasses" not in keys
 
 
@@ -286,7 +293,7 @@ def test_a_quote_in_the_title_cannot_break_the_scalar():
     rec["title"] = 'He said "buy" \\ then left'
     _, md = render(rec, first_raised="2026-07-24", last_verified="2026-07-25")
     block = md.split("---")[1].strip()
-    assert len(block.split("\n")) == 10
+    assert len(block.split("\n")) == len(EXPECTED_FRONTMATTER_KEYS)
 
 
 def test_enum_and_date_values_stay_unquoted():

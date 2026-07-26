@@ -187,6 +187,7 @@ def format_summary(
     written = stats.get("written", 0)
     deferred = stats.get("deferred_over_cap", 0)
     collided = stats.get("not_written_collision", 0)
+    updated = stats.get("pages_updated", 0)
     if not written and not deferred and not collided:
         return None
 
@@ -213,6 +214,14 @@ def format_summary(
         body = [f"{written} new " + ("entry" if written == 1 else "entries") + ".", ""]
 
     tail = []
+    if updated:
+        # Stated separately from new entries. "We checked again and it still
+        # holds" is a different message from "here is something new", and
+        # folding them into one count tells the group neither.
+        tail.append(
+            f"{updated} existing entr{'y' if updated == 1 else 'ies'} "
+            f"revised with newer findings."
+        )
     if deferred:
         # Surfaced deliberately. A silently truncated list reads exactly like
         # "nothing was missed", and the cap is the main cost lever. "Logged",

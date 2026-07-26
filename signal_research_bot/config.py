@@ -86,6 +86,7 @@ class Config:
     foreign_vault_dir: Path | None
     log_level: str
     max_tasks_per_window: int
+    max_updates_per_window: int
     worth_threshold: float
     notify: bool
     research_domain: str
@@ -112,6 +113,7 @@ class Config:
             foreign_vault_dir=Path(foreign) if foreign else None,
             log_level=os.environ.get("SRB_LOG_LEVEL", "INFO").upper(),
             max_tasks_per_window=int(os.environ.get("SRB_MAX_TASKS_PER_WINDOW", "4")),
+            max_updates_per_window=int(os.environ.get("SRB_MAX_UPDATES_PER_WINDOW", "2")),
             worth_threshold=float(os.environ.get("SRB_WORTH_THRESHOLD", "0.6")),
             notify=os.environ.get("SRB_NOTIFY", "false").lower() in {"1", "true", "yes"},
             research_domain=os.environ.get("SRB_RESEARCH_DOMAIN", DEFAULT_DOMAIN).strip(),

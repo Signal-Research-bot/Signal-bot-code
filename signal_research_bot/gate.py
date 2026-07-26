@@ -8,17 +8,23 @@ in code rather than by prompting. Asking a model to "only research important
 things" produces a model's opinion of important; a threshold and a hard cap
 produce a bound.
 
-Two rules:
+Three rules:
 
 * `worth >= threshold` -- banter, rhetorical questions and matters of taste
   never reach a research stage at all.
 * `max_tasks_per_window` -- a hard integer cap, taking the highest-worth tasks.
+* `max_updates` -- of that cap, how much may go on revisiting subjects the
+  archive already covers.
 
 Dropping a task costs nothing. Tightening the cap by one task per day saves
 more than the entire cheap-research mechanism.
 
-**Nothing is dropped silently.** Every deferral is returned and reported: a
-silently truncated list reads exactly like "nothing was missed".
+**Nothing is dropped silently.** Every rejected task is returned, and the
+caller records the question text for the two categories where losing it costs
+something: deferred by the cap, and dropped as a duplicate. Out-of-scope and
+low-worth are counted only, deliberately -- they are the categories where
+dropping is the whole point. A silently truncated list reads exactly like
+"nothing was missed".
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ class GateResult:
     def counts(self) -> dict[str, int]:
         return {
             "accepted": len(self.accepted),
+            "accepted_updates": sum(1 for t in self.accepted if t.get("is_update")),
             "rejected_out_of_scope": len(self.rejected_out_of_scope),
             "rejected_low_worth": len(self.rejected_low_worth),
             "rejected_duplicate": len(self.rejected_duplicate),
@@ -55,8 +62,19 @@ def apply_gate(
     *,
     worth_threshold: float,
     max_tasks: int,
+    max_updates: int = 2,
 ) -> GateResult:
-    """Split triaged tasks into what gets researched and what does not."""
+    """Split triaged tasks into what gets researched and what does not.
+
+    A lead about a subject the archive already covers is an UPDATE rather than a
+    new entry, and only when triage says the conversation carried something new.
+    Three properties keep that from becoming an unbounded spend channel:
+
+    * an update clears the same worth threshold and the same cap as a fresh lead
+    * a pure restatement is still dropped for free, exactly as before
+    * at equal worth a new subject outranks an update, and `max_updates` bounds
+      how much of one window's cap updates may take
+    """
     duplicates: list[dict[str, Any]] = []
     out_of_scope: list[dict[str, Any]] = []
     low_worth: list[dict[str, Any]] = []
@@ -68,23 +86,46 @@ def apply_gate(
         # still does not belong in this archive.
         if not task.get("in_scope", True):
             out_of_scope.append(task)
-        elif task.get("duplicate_of"):
+            continue
+        known = bool(task.get("duplicate_of") or task.get("topic_key"))
+        if known and not str(task.get("new_information") or "").strip():
             duplicates.append(task)
-        elif float(task.get("worth", 0.0)) < worth_threshold:
+            continue
+        if float(task.get("worth", 0.0)) < worth_threshold:
             low_worth.append(task)
-        else:
-            candidates.append(task)
+            continue
+        candidates.append({**task, "is_update": known} if known else task)
 
-    # Highest worth first, then stable by question so a re-run of the same
-    # window makes the same decisions -- the batch has to be idempotent.
-    candidates.sort(key=lambda t: (-float(t.get("worth", 0.0)), t.get("question", "")))
+    # Highest worth first; at equal worth a new subject beats an update, so a
+    # busy window cannot spend its whole cap revisiting what is already written.
+    # Then stable by question, so a re-run of the same window makes the same
+    # decisions -- the batch has to be idempotent.
+    candidates.sort(
+        key=lambda t: (
+            -float(t.get("worth", 0.0)),
+            bool(t.get("is_update")),
+            t.get("question", ""),
+        )
+    )
+
+    accepted: list[dict[str, Any]] = []
+    over_cap: list[dict[str, Any]] = []
+    updates_taken = 0
+    for task in candidates:
+        if len(accepted) >= max_tasks:
+            over_cap.append(task)
+        elif task.get("is_update") and updates_taken >= max_updates:
+            over_cap.append(task)
+        else:
+            updates_taken += bool(task.get("is_update"))
+            accepted.append(task)
 
     return GateResult(
-        accepted=candidates[:max_tasks],
+        accepted=accepted,
         rejected_out_of_scope=out_of_scope,
         rejected_low_worth=low_worth,
         rejected_duplicate=duplicates,
-        deferred_over_cap=candidates[max_tasks:],
+        deferred_over_cap=over_cap,
     )
 
 

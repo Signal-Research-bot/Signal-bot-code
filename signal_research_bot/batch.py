@@ -35,7 +35,8 @@ from .identity import (
     load_or_create_key,
     vet_auto_handles,
 )
-from .kb.render import depersonalise, render, title_for
+from .kb.render import depersonalise, normalise_topic_key, render, slug, title_for
+from .kb.state import VaultIndex, content_hash, merge, state_from_record
 from .kb.writer import VaultError, VaultWriter, git_commit
 from .logging_setup import configure
 from .metrics import record_run
@@ -44,6 +45,165 @@ from .redact import RedactionUnavailable, Redactor
 from .transcript import Builder
 
 log = logging.getLogger(__name__)
+
+CHANGELOG_SUBDIR = "Changelog"
+
+
+def resolve_topic_key(
+    *, triage_key: Any, model_key: Any, title: str, known: set[str]
+) -> str:
+    """Which topic this research belongs to.
+
+    Triage may only MATCH, never mint: it is the one stage that sees the archive
+    listing, so a key it reproduces is a key that already exists. Stage 3b has
+    never seen the archive and sees one question, so a key it invents cannot be
+    stable across runs -- it is used only when triage found no match.
+
+    The fallback is derived from the title rather than random, so a re-run of
+    the same window makes the same decision. The batch has to be idempotent.
+    """
+    matched = normalise_topic_key(triage_key)
+    if matched and matched in known:
+        return matched
+    return normalise_topic_key(model_key) or normalise_topic_key(title) or "topic"
+
+
+def _file_record(
+    vault: VaultWriter,
+    index: VaultIndex,
+    record: dict[str, Any],
+    task: dict[str, Any],
+    *,
+    question: str,
+    today: str,
+    stats: dict[str, Any],
+    log_lines: list[str],
+) -> bool:
+    """Create a page, update one, or refuse. True when the vault now holds it.
+
+    The three-way decision, and why each branch exists:
+
+    * **no state** -- a subject the archive has not covered. Create it.
+    * **state, not managed** -- a page adopted from before the index existed.
+      The bot has no record of its contents, so it must not re-render it: the
+      update is appended and `last_verified` bumped, nothing else touched.
+    * **state, but the file no longer hashes to what we wrote** -- a person has
+      edited it. Refused. `.claude/skills/kb-schema` says the bot never edits a
+      human-authored page, and that line is not relaxed by pages becoming
+      living documents.
+    """
+    topic_key = resolve_topic_key(
+        triage_key=task.get("topic_key"), model_key=record.get("topic_key"),
+        title=str(record.get("title", "")), known=index.keys(),
+    )
+    state = index.get(topic_key)
+
+    if state is not None and not _page_is_ours(vault, state):
+        stats["updates_refused_hand_edited"] += 1
+        stats.setdefault("refused_questions", []).append(question)
+        log_lines.append(
+            f"- **Not updated** [[{state.stem}]] — the page has been edited by "
+            f"hand since the bot last wrote it, so it was left alone."
+        )
+        log.error("refusing to overwrite a hand-edited page", extra={"stem": state.stem})
+        return False
+
+    if state is not None and not state.managed:
+        return _append_to_legacy_page(vault, index, state, record, today, stats, log_lines)
+
+    if state is None:
+        stem = index.reserve_stem(slug(str(record.get("title") or "Untitled")))
+        new_state = state_from_record(
+            record, topic_key=topic_key, stem=stem,
+            title=str(record.get("title") or "Untitled"), today=today,
+        )
+        verb, updates = "Created", ()
+    else:
+        new_state, entry = merge(state, record, today=today)
+        stem, updates = new_state.stem, new_state.updates
+        verb = "Updated"
+
+    _, markdown = render(
+        new_state.as_record(),
+        first_raised=new_state.first_raised, last_verified=new_state.last_verified,
+        topic_key=topic_key, stem=stem, updates=list(updates),
+        related=index.related_stems(topic_key, new_state.tags),
+    )
+    result = vault.write(stem, markdown, overwrite=state is not None)
+    if not result.wrote:
+        # The research happened and is not in the vault. Counting it as written
+        # -- which this did unconditionally until the writer learned to report
+        # an outcome -- committed a page that was never created and announced it
+        # to the group as a new finding.
+        stats["not_written_collision"] += 1
+        # Same reasoning as deferred_questions: the window is consumed at the
+        # end of this run, so without the question there is nothing to retry.
+        stats.setdefault("collided_questions", []).append(question)
+        log_lines.append(
+            f"- **Not written** — a page named `{stem}` already exists with "
+            f"different content; the finding is in the run metrics only."
+        )
+        log.error(
+            "entry not filed: an entry with this name already exists",
+            extra={"stem": stem, "outcome": result.outcome.value},
+        )
+        return False
+
+    index.put(replace(new_state, content_sha=content_hash(markdown)))
+    stats["pages_created" if state is None else "pages_updated"] += 1
+    log_lines.append(f"- **{verb}** [[{stem}]] — {record.get('finding', 'unestablished')}.")
+    return True
+
+
+def _page_is_ours(vault: VaultWriter, state) -> bool:
+    """True when the file on disk is byte-for-byte what the bot last wrote."""
+    path = vault.target_dir / f"{state.stem}.md"
+    if not path.exists():
+        return True          # gone: recreating it is not editing anyone's work
+    return content_hash(path.read_text(encoding="utf-8")) == state.content_sha
+
+
+def _append_to_legacy_page(
+    vault: VaultWriter, index: VaultIndex, state, record: dict[str, Any],
+    today: str, stats: dict[str, Any], log_lines: list[str],
+) -> bool:
+    """Add a dated entry to a page written before the index existed.
+
+    Two bounded operations and no parsing: bump one frontmatter line, append one
+    section. The page's prose is left exactly as it is, because nothing here
+    knows what it says.
+    """
+    from .kb.render import bump_last_verified, render_update_block
+
+    path = vault.target_dir / f"{state.stem}.md"
+    if not path.exists():
+        return False
+    text = path.read_text(encoding="utf-8")
+
+    block = render_update_block({
+        "date": today,
+        "headline": str(record.get("headline") or "").strip(),
+        "changes": [f"Finding: {record.get('finding', 'unestablished')}."],
+        "sources": [e.get("url", "") for e in (record.get("evidence") or [])],
+    })
+    bumped = bump_last_verified(text, today)
+    if bumped is None:
+        # The frontmatter is not the shape this can safely edit. Appending is
+        # still safe, so the entry is recorded and only the date is skipped.
+        stats["legacy_bump_skipped"] += 1
+        bumped = text
+    if "## Updates" not in bumped:
+        bumped = bumped.rstrip("\n") + "\n\n## Updates\n\n"
+    updated = bumped.rstrip("\n") + "\n\n" + block
+
+    result = vault.write(state.stem, updated, overwrite=True)
+    index.put(replace(state, last_verified=today, content_sha=content_hash(updated)))
+    stats["pages_updated"] += 1
+    log_lines.append(
+        f"- **Updated** [[{state.stem}]] — {record.get('finding', 'unestablished')} "
+        f"(adopted page: a dated entry was appended, the original text left as it was)."
+    )
+    return result.wrote
 
 
 def run(cfg: Config, *, dry_run: bool = False) -> int:
@@ -120,6 +280,11 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         transport=AnthropicTransport(),
     )
     vault = VaultWriter(cfg.kb_dir, cfg.foreign_vault_dir) if cfg.kb_dir else None
+    index = VaultIndex(vault.target_dir).load() if vault else None
+    # One line per thing done to the vault, appended to the changelog at the end
+    # so what the bot did is auditable from inside Obsidian rather than only
+    # from the operator's local metrics file.
+    log_lines: list[str] = []
 
     stats = {
         "window": window_id,
@@ -128,6 +293,8 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         "cheap_attempted": 0, "cheap_resolved": 0, "escalated": 0,
         "written": 0, "failed": 0, "ungrounded_dropped": 0, "refusals": 0,
         "unsourced_dropped": 0, "not_written_collision": 0,
+        "pages_created": 0, "pages_updated": 0,
+        "updates_refused_hand_edited": 0, "legacy_bump_skipped": 0,
         # What the roster actually covered. Recorded because an empty roster no
         # longer refuses to run: without this, a window with no deny-list at all
         # would look identical in the metrics to a fully covered one.
@@ -176,8 +343,18 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         triaged.get("tasks") or [],
         worth_threshold=cfg.worth_threshold,
         max_tasks=cfg.max_tasks_per_window,
+        max_updates=cfg.max_updates_per_window,
     )
     stats.update(gated.counts)
+    if gated.rejected_duplicate:
+        # Same reasoning as deferred_questions below. A duplicate used to leave
+        # nothing behind but an integer, which made the gate's own promise that
+        # nothing is dropped silently untrue for the one category most likely to
+        # be worth a second look.
+        stats["dropped_duplicates"] = [
+            {"question": t.get("question", ""), "topic_key": t.get("topic_key")}
+            for t in gated.rejected_duplicate
+        ]
     if gated.deferred_over_cap:
         # Never silent: a truncated list reads exactly like "nothing was missed".
         #
@@ -256,23 +433,13 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
                 continue
 
             record.setdefault("title", title_for(question, month))
-            stem, markdown = render(record, first_raised=today, last_verified=today)
             if vault:
-                result = vault.write(stem, markdown)
-                if not result.wrote:
-                    # The research happened and is not in the vault. Counting it
-                    # as written -- which this did unconditionally until the
-                    # writer learned to report an outcome -- committed a page
-                    # that was never created and announced it to the group.
-                    stats["not_written_collision"] += 1
-                    # Same reasoning as deferred_questions: the window is
-                    # consumed at the end of this run, so without the question
-                    # itself there is nothing left to research from.
-                    stats.setdefault("collided_questions", []).append(question)
-                    log.error(
-                        "entry not filed: an entry with this name already exists",
-                        extra={"stem": stem, "outcome": result.outcome.value},
-                    )
+                filed = _file_record(
+                    vault, index, record, task,
+                    question=question, today=today, stats=stats,
+                    log_lines=log_lines,
+                )
+                if not filed:
                     continue
                 stats["written"] += 1
                 # Depersonalised again here rather than reusing the rendered
@@ -307,20 +474,70 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
             # task leaves nothing to retry from.
             stats.setdefault("unfinished_questions", []).append(question)
 
-    _finish(cache, window_id, messages, cfg, client, stats, vault, written_entries)
+    if gated.rejected_duplicate:
+        log_lines.append(
+            f"- **Duplicate dropped** — {len(gated.rejected_duplicate)} lead(s) "
+            f"restated a subject the archive already covers, with nothing new."
+        )
+    _finish(
+        cache, window_id, messages, cfg, client, stats, vault, written_entries,
+        log_lines=log_lines, today=today,
+    )
     return 0
 
 
-def _finish(cache, window_id, messages, cfg, client, stats, vault, entries=()) -> None:
-    if vault and stats.get("written"):
+def _write_changelog(vault: VaultWriter, lines: list[str], today: str) -> None:
+    """One dated section per run, appended to Changelog/YYYY-MM.md.
+
+    Its own subdirectory rather than Research Log/, because digest() globs that
+    directory and would otherwise offer the changelog to triage as an archive
+    entry to be duplicated against. One file per month bounds growth, and
+    nothing in the codebase ever reads it back.
+
+    Dates only, never the window id: that is second-precision, and kb-schema
+    forbids a timestamp finer than 15 minutes on a page.
+    """
+    if not lines:
+        return
+    log_writer = VaultWriter(
+        vault.vault_dir, vault.foreign_vault_dir, subdir=CHANGELOG_SUBDIR
+    )
+    month = today[:7]
+    header = "\n".join([
+        "---",
+        f"title: Changelog {month}",
+        "entity_type: changelog",
+        'tags: ["signal-derived", "changelog"]',
+        "---",
+        "",
+        f"# Changelog {month}",
+        "",
+        "What the bot did to this vault. Written automatically.",
+        "",
+    ])
+    body = "\n".join([f"## {today}", "", *[depersonalise(x) for x in lines], ""])
+    try:
+        log_writer.append(month, body + "\n", header=header)
+    except (VaultError, OSError) as exc:
+        # Never fatal: the research is already filed, and losing an audit line
+        # is not worth failing a window that otherwise succeeded.
+        log.warning("changelog not written", extra={"error": type(exc).__name__})
+
+
+def _finish(cache, window_id, messages, cfg, client, stats, vault, entries=(),
+            *, log_lines=(), today="") -> None:
+    if vault:
+        _write_changelog(vault, list(log_lines), today)
+    if vault and (stats.get("written") or stats.get("pages_updated")):
         git_commit(
             vault.vault_dir,
             f"research: {stats['written']} entries from window {window_id}",
             push=True,
         )
     # Marked only at the end: a crash mid-window leaves the messages pending so
-    # the next run picks them up. Re-processing is safe -- the vault writer
-    # will not overwrite an existing record.
+    # the next run picks them up. Re-processing is safe: a page the bot already
+    # wrote hashes to what the index recorded, so the re-run either produces the
+    # identical page or is reported as a collision -- never a silent clobber.
     cache.mark_processed(window_id, messages)
     stats.update(
         input_tokens=client.usage.input_tokens,

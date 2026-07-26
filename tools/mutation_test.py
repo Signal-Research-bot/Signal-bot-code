@@ -41,11 +41,14 @@ RECEIVER = REPO_ROOT / "signal_research_bot" / "receiver.py"
 IMPORTER = REPO_ROOT / "signal_research_bot" / "importer.py"
 WRITER = REPO_ROOT / "signal_research_bot" / "kb" / "writer.py"
 BATCH = REPO_ROOT / "signal_research_bot" / "batch.py"
+STATE = REPO_ROOT / "signal_research_bot" / "kb" / "state.py"
+GATE = REPO_ROOT / "signal_research_bot" / "gate.py"
 SUITE = (
     "tests/test_egress.py tests/test_client.py tests/test_transcript.py "
     "tests/test_envelope.py tests/test_redact.py tests/test_kb.py "
     "tests/test_batch.py tests/test_identity.py tests/test_receiver.py "
-    "tests/test_importer.py"
+    "tests/test_importer.py tests/test_kb_state.py tests/test_kb_migration.py "
+    "tests/test_gate.py"
 )
 
 
@@ -195,17 +198,90 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "an unwritten record is counted and announced again",
-        "                if not result.wrote:",
-        "                if False:",
+        "    if not result.wrote:",
+        "    if False:",
         BATCH,
     ),
-    # --- keeping participants out of the research itself ---------------------
+    # --- one page per topic, and nobody else's page touched -------------------
     Mutation(
-        "speaker labels no longer stripped from pages",
-        "    record = depersonalise(record)",
-        "    record = record",
+        "an update overwrites a page a human has edited",
+        "    if state is not None and not _page_is_ours(vault, state):",
+        "    if False:",
+        BATCH,
+    ),
+    Mutation(
+        "an adopted page is re-rendered from a record the bot never had",
+        "    if state is not None and not state.managed:",
+        "    if False:",
+        BATCH,
+    ),
+    Mutation(
+        "an update renames the page and breaks every inbound wikilink",
+        "        stem, updates = new_state.stem, new_state.updates",
+        "        stem, updates = slug(str(record.get('title'))), new_state.updates",
+        BATCH,
+    ),
+    Mutation(
+        "triage is allowed to mint a topic key it never saw",
+        "    if matched and matched in known:",
+        "    if matched:",
+        BATCH,
+    ),
+    Mutation(
+        "update blocks bypass depersonalisation",
+        "    update = depersonalise(update)",
+        "    update = dict(update)",
         RENDER,
     ),
+    Mutation(
+        "related links and updates bypass depersonalisation",
+        "    payload = depersonalise({",
+        "    payload = ({",
+        RENDER,
+    ),
+    Mutation(
+        "topic keys are used exactly as the model wrote them",
+        "    text = depersonalise(str(value or \"\"))",
+        "    text = str(value or \"\")",
+        RENDER,
+    ),
+    Mutation(
+        "last_verified is rewritten in a page whose shape we do not recognise",
+        "    if len(hits) != 1:",
+        "    if False:",
+        RENDER,
+    ),
+    Mutation(
+        "evidence already gathered is replaced instead of unioned",
+        "    evidence = _union_evidence(state.evidence, record.get(\"evidence\") or [])",
+        "    evidence = _tuple_of_dicts(record.get(\"evidence\"))",
+        STATE,
+    ),
+    Mutation(
+        "a contested finding stops being flagged after a clean re-check",
+        "    status = _strongest(",
+        "    status = str(record.get('research_status', state.research_status)) or _strongest(",
+        STATE,
+    ),
+    Mutation(
+        "a restatement with nothing new is researched again anyway",
+        '        if known and not str(task.get("new_information") or "").strip():',
+        "        if False:",
+        GATE,
+    ),
+    Mutation(
+        "an update skips the worth threshold",
+        '        if float(task.get("worth", 0.0)) < worth_threshold:',
+        "        if False:",
+        GATE,
+    ),
+    # --- keeping participants out of the research itself ---------------------
+    #
+    # The record used to be depersonalised on its own line. It is now one key of
+    # the payload dict, alongside `related` and `updates` -- so the mutation that
+    # kills that call ("related links and updates bypass depersonalisation")
+    # covers the page body too, and a second one here would only be the same
+    # test twice.
     Mutation(
         "@handles no longer stripped from pages",
         "    return _AT_HANDLE.sub(MEMBER, _SPEAKER.sub(MEMBER, text))",

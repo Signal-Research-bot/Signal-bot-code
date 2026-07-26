@@ -22,13 +22,15 @@ from signal_research_bot.gate import (  # noqa: E402
 
 
 def task(q: str, worth: float = 0.9, difficulty: str = "low", duplicate=None,
-         in_scope: bool = True) -> dict:
+         in_scope: bool = True, topic_key=None, new_information=None) -> dict:
     return {
         "question": q,
         "in_scope": in_scope,
         "worth": worth,
         "difficulty": difficulty,
         "duplicate_of": duplicate,
+        "topic_key": topic_key,
+        "new_information": new_information,
         "rationale": "",
     }
 
@@ -53,6 +55,67 @@ def test_duplicates_are_rejected_before_worth():
         worth_threshold=0.6, max_tasks=10,
     )
     assert r.accepted == [] and len(r.rejected_duplicate) == 1
+
+
+# --- revisiting a subject the archive already covers --------------------------
+
+
+def test_a_restatement_with_nothing_new_is_still_dropped_for_free():
+    """People repeat themselves. Researching that again buys nothing and costs
+    real money."""
+    r = apply_gate(
+        [task("known", worth=1.0, topic_key="reserves-audit", new_information=None)],
+        worth_threshold=0.6, max_tasks=10,
+    )
+    assert r.accepted == [] and len(r.rejected_duplicate) == 1
+
+
+def test_a_known_subject_with_new_information_is_accepted_as_an_update():
+    r = apply_gate(
+        [task("known", topic_key="reserves-audit",
+              new_information="the auditor was named today")],
+        worth_threshold=0.6, max_tasks=10,
+    )
+    assert len(r.accepted) == 1
+    assert r.accepted[0]["is_update"] is True
+    assert r.counts["accepted_updates"] == 1
+
+
+def test_an_update_still_has_to_clear_the_worth_threshold():
+    """New information must not become a way around the gate."""
+    r = apply_gate(
+        [task("known", worth=0.1, topic_key="reserves-audit",
+              new_information="something new")],
+        worth_threshold=0.6, max_tasks=10,
+    )
+    assert r.accepted == [] and len(r.rejected_low_worth) == 1
+
+
+def test_a_blank_new_information_is_not_new_information():
+    r = apply_gate(
+        [task("known", topic_key="reserves-audit", new_information="   ")],
+        worth_threshold=0.6, max_tasks=10,
+    )
+    assert r.accepted == [] and len(r.rejected_duplicate) == 1
+
+
+def test_a_fresh_subject_outranks_an_update_at_equal_worth():
+    tasks = [
+        task("revisit", worth=0.9, topic_key="known", new_information="new"),
+        task("fresh", worth=0.9),
+    ]
+    r = apply_gate(tasks, worth_threshold=0.6, max_tasks=1)
+    assert [t["question"] for t in r.accepted] == ["fresh"]
+
+
+def test_updates_cannot_take_more_than_their_share_of_a_window():
+    tasks = [
+        task(f"revisit{i}", worth=0.9, topic_key=f"k{i}", new_information="new")
+        for i in range(4)
+    ]
+    r = apply_gate(tasks, worth_threshold=0.6, max_tasks=10, max_updates=2)
+    assert len(r.accepted) == 2
+    assert len(r.deferred_over_cap) == 2, "the rest must be reported, not dropped"
 
 
 def test_cap_keeps_the_highest_worth():

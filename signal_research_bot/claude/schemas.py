@@ -97,10 +97,24 @@ TRIAGE = _obj(
                         "description": "Title of an existing KB entry this "
                         "duplicates, or null.",
                     },
+                    "topic_key": {
+                        "type": ["string", "null"],
+                        "description": "If the archive listing already shows a "
+                        "key for this same subject, reproduce that key EXACTLY. "
+                        "Otherwise null -- never invent one.",
+                    },
+                    "new_information": {
+                        "type": ["string", "null"],
+                        "description": "Only when this repeats a subject the "
+                        "archive already covers: one sentence on what is NEW -- "
+                        "a development since the entry was written, a claim that "
+                        "contradicts its recorded finding, or a source it does "
+                        "not cite. Null is the normal answer.",
+                    },
                     "rationale": {"type": "string"},
                 },
                 ["question", "in_scope", "worth", "difficulty", "duplicate_of",
-                 "rationale"],
+                 "topic_key", "new_information", "rationale"],
             ),
         }
     },
@@ -148,6 +162,15 @@ KB_RECORD = _obj(
             "type": "string",
             "description": "Condensed question. Becomes the wikilink target, "
             "so it must be stable.",
+        },
+        "topic_key": {
+            "type": "string",
+            "description": "A short, stable, lowercase-hyphenated identifier "
+            "for the SUBJECT this entry is about, e.g. "
+            "'reserves-attestation-scope'. It is what joins later research to "
+            "this page, so choose the enduring subject rather than the phrasing "
+            "of today's question. Two to five words. Never a person, a "
+            "username, a speaker label, or a date.",
         },
         "question": {"type": "string"},
         "answer": {"type": "string"},
@@ -214,9 +237,9 @@ KB_RECORD = _obj(
         },
     },
     [
-        "title", "question", "answer", "confidence", "research_status",
-        "finding", "headline", "evidence", "contradictions", "open_questions",
-        "tags",
+        "title", "topic_key", "question", "answer", "confidence",
+        "research_status", "finding", "headline", "evidence", "contradictions",
+        "open_questions", "tags",
     ],
 )
 

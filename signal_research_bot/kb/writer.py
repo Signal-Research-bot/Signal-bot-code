@@ -3,9 +3,12 @@
 Three safety properties, each of which exists because the vault is a directory
 of hand-curated notes that a human also edits:
 
-* **Creates only, never edits.** The bot writes new files under its own
-  subdirectory. It never touches a file it did not create, so a bad run cannot
-  damage anything a person wrote.
+* **Never touches a file it did not write.** A page is updated in place only
+  when `kb/state.py` holds a hash matching the bytes on disk; anything else is
+  a file a person has been in, and the update is refused rather than applied.
+  Deciding that is the caller's job -- this module will replace a file when
+  told to, and `overwrite=False` is the default precisely so that a caller must
+  say so deliberately.
 * **Refuses to write outside the vault.** Paths are resolved and checked, so a
   title containing traversal characters cannot escape.
 * **Atomic.** Temp file plus os.replace, because the vault may be open in
@@ -117,23 +120,45 @@ class VaultWriter:
         log.info("record written", extra={"path": path, "bytes": len(markdown)})
         return WriteResult(path, outcome)
 
+    def append(self, stem: str, markdown: str, *, header: str = "") -> WriteResult:
+        """Add to the end of a file, creating it from `header` if absent.
+
+        Atomic like write(), rather than open("a"): the vault may be open in
+        Obsidian, and a partial append is visible there immediately.
+        """
+        self.target_dir.mkdir(parents=True, exist_ok=True)
+        path = self._resolve(stem)
+        existing = path.read_text(encoding="utf-8") if path.exists() else header
+        outcome = WriteOutcome.REPLACED if path.exists() else WriteOutcome.CREATED
+        tmp = path.with_suffix(".md.tmp")
+        tmp.write_text(existing + markdown, encoding="utf-8", newline="\n")
+        os.replace(tmp, path)
+        log.info("appended", extra={"path": path, "bytes": len(markdown)})
+        return WriteResult(path, outcome)
+
     def digest(self, limit: int = 400) -> str:
         """A compact index of existing entries, for the triage stage.
 
-        Titles and statuses only. Sending answer bodies back would balloon the
-        cached prefix for no gain -- triage only needs to know what already
-        exists.
+        Titles, statuses and topic keys only. Sending answer bodies back would
+        balloon the cached prefix for no gain -- triage only needs to know what
+        already exists, and which key to reproduce if it sees the same subject
+        raised again.
+
+        The scan window is 20 lines rather than the frontmatter's exact height:
+        at 12 it was exactly the block size, so one added key would have pushed
+        a value out of range and silently degraded every entry to "unknown".
         """
         if not self.target_dir.is_dir():
             return "(archive is empty)"
         lines = []
         for path in sorted(self.target_dir.glob("*.md"))[:limit]:
-            status = "unknown"
-            for line in path.read_text(encoding="utf-8").splitlines()[:12]:
+            status, key = "unknown", "-"
+            for line in path.read_text(encoding="utf-8").splitlines()[:20]:
                 if line.startswith("research_status:"):
                     status = line.split(":", 1)[1].strip()
-                    break
-            lines.append(f"- {path.stem} [{status}]")
+                elif line.startswith("topic_key:"):
+                    key = line.split(":", 1)[1].strip() or "-"
+            lines.append(f"- {path.stem} [{status}] (key: {key})")
         return "\n".join(lines) or "(archive is empty)"
 
 

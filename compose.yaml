@@ -135,8 +135,13 @@ services:
   #   docker compose --profile batch run --rm batch
   # A separate service rather than `run` against `worker`, so the long-running
   # receiver is never restarted to run a batch. Both touch the same SQLite
-  # cache; WAL plus busy_timeout=10000 covers the overlap, and the batch is
-  # idempotent so a late double-run is harmless.
+  # cache; WAL plus busy_timeout=10000 covers the overlap.
+  #
+  # Run ONE batch at a time. This used to say a late double-run was harmless,
+  # which held while a page was written once and never touched again. Now that a
+  # page is updated in place, two runs on the same topic would each read the
+  # state the other is about to replace, and one update would be lost. Nothing
+  # enforces it: keep the schedule to a single job.
   batch:
     build:
       context: .
@@ -160,6 +165,7 @@ services:
       SRB_CACHE_KEY: ${SRB_CACHE_KEY:?set SRB_CACHE_KEY in .env}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
       SRB_MAX_TASKS_PER_WINDOW: ${SRB_MAX_TASKS_PER_WINDOW:-4}
+      SRB_MAX_UPDATES_PER_WINDOW: ${SRB_MAX_UPDATES_PER_WINDOW:-2}
       SRB_WORTH_THRESHOLD: ${SRB_WORTH_THRESHOLD:-0.6}
       SRB_NOTIFY: ${SRB_NOTIFY:-false}
       SRB_KB_DIR: /vault

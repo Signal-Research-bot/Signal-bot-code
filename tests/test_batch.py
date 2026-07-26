@@ -10,6 +10,7 @@ leave messages pending rather than silently consumed.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ from signal_research_bot.claude.client import Refusal, Usage  # noqa: E402
 from signal_research_bot.config import Config  # noqa: E402
 from signal_research_bot.egress import EgressViolation  # noqa: E402
 from signal_research_bot.envelope import Kind, ParsedMessage  # noqa: E402
+from signal_research_bot.kb.render import depersonalise  # noqa: E402
+from signal_research_bot.kb.state import VaultIndex  # noqa: E402
 
 ALICE = str(uuid.UUID(int=0xA11CE))
 GROUP = "Zm9vYmFyZ3JvdXBpZGxvbmdlbm91Z2g9PQ=="
@@ -118,7 +121,8 @@ def cfg_for(tmp_path: Path, **kw) -> Config:
         quarantine_dir=tmp_path / "q",
         metrics_path=tmp_path / "metrics.jsonl",
         kb_dir=tmp_path / "vault", foreign_vault_dir=None,
-        log_level="CRITICAL", max_tasks_per_window=4, worth_threshold=0.6,
+        log_level="CRITICAL", max_tasks_per_window=4, max_updates_per_window=2,
+        worth_threshold=0.6,
         notify=False,
         research_domain='Financial investigation of the crypto sector.',
     )
@@ -177,7 +181,8 @@ def cheap(resolved=True, urls=("https://a.example",)):
 
 
 def record(urls=("https://a.example",)):
-    return {"title": "Research - q0 - 2026-07", "question": "q0", "answer": "a",
+    return {"title": "Research - q0 - 2026-07", "topic_key": "reserves-audit",
+            "question": "q0", "answer": "a",
             "confidence": "corroborated", "research_status": "answered",
             "evidence": [{"url": u, "quote": "q", "confidence": "primary"} for u in urls],
             "contradictions": [], "open_questions": [], "tags": []}
@@ -509,16 +514,22 @@ def test_a_failed_task_leaves_its_question_behind(env, monkeypatch):
 
 # --- research that could not be filed -----------------------------------------
 #
-# Two tasks whose records carry the same title render to the same filename. The
-# writer will not clobber the first, so the second is not written -- and the
-# batch used to count it as written anyway, commit it, and announce it.
+# A page the index does not know about -- one written before topic keys existed
+# and never adopted -- already holding the filename a new topic wants. The
+# writer will not clobber it, so the research is not filed, and the batch used
+# to count it as written anyway, commit it, and announce it to the group.
 
 
 def _colliding(env, monkeypatch, **cfg_kw):
-    """Two researched tasks, one filename. Same title, different answers."""
+    """One researched task whose filename is already taken by a stranger."""
+    research_log = env / "vault" / "Research Log"
+    research_log.mkdir(parents=True, exist_ok=True)
+    (research_log / "Research - q0 - 2026-07.md").write_text(
+        "a page nobody adopted", encoding="utf-8"
+    )
     client = FakeClient(
-        {"extract": extracted(n=2), "triage": triaged(n=2), "cheap": cheap(),
-         "format": lambda n: dict(record(), answer=f"answer number {n}")},
+        {"extract": extracted(), "triage": triaged(), "cheap": cheap(),
+         "format": record()},
         search_results={"cheap": {"https://a.example"}},
     )
     install(monkeypatch, client)
@@ -529,9 +540,10 @@ def _colliding(env, monkeypatch, **cfg_kw):
 def test_a_record_that_could_not_be_filed_is_never_counted_as_written(env, monkeypatch):
     _colliding(env, monkeypatch)
     line = (env / "metrics.jsonl").read_text(encoding="utf-8")
-    assert '"written": 1' in line, "the discarded entry was counted as written"
+    assert '"written": 0' in line, "the discarded entry was counted as written"
     assert '"not_written_collision": 1' in line
-    assert len(list((env / "vault" / "Research Log").glob("*.md"))) == 1
+    page = (env / "vault" / "Research Log" / "Research - q0 - 2026-07.md")
+    assert page.read_text(encoding="utf-8") == "a page nobody adopted"
 
 
 def test_a_record_that_could_not_be_filed_is_not_announced_to_the_group(env, monkeypatch):
@@ -543,7 +555,7 @@ def test_a_record_that_could_not_be_filed_is_not_announced_to_the_group(env, mon
     )
     _colliding(env, monkeypatch, notify=True)
     assert len(posted) == 1
-    assert len(posted[0]) == 1, "an unwritten entry was announced as a new finding"
+    assert posted[0] == [], "an unwritten entry was announced as a new finding"
 
 
 def test_a_record_that_could_not_be_filed_leaves_its_question_behind(env, monkeypatch):
@@ -551,7 +563,211 @@ def test_a_record_that_could_not_be_filed_leaves_its_question_behind(env, monkey
     text the research is gone for good."""
     _colliding(env, monkeypatch)
     line = (env / "metrics.jsonl").read_text(encoding="utf-8")
-    assert '"collided_questions": ["q1"]' in line
+    assert '"collided_questions": ["q0"]' in line
+
+
+# --- one page per topic, not per run ------------------------------------------
+
+
+def _seed(env):
+    """One fresh unprocessed message.
+
+    A window consumes what it processes, so without this a second run finds an
+    empty cache and does nothing -- which would let every update test below pass
+    while proving only that the batch declined to run.
+    """
+    _seed.n = getattr(_seed, "n", 0) + 1
+    ts = TS + _seed.n * 3_600_000
+    cache = Cache.open(env / "c.db")
+    cache.add(ParsedMessage(
+        kind=Kind.MESSAGE, group_id=GROUP, source=ALICE,
+        timestamp_ms=ts - (ts % (15 * 60 * 1000)),
+        body="more on the reserves question", raw_timestamp_ms=ts,
+    ))
+    cache.close()
+
+
+def _run_window(env, monkeypatch, rec=None, *, triage=None, **cfg_kw):
+    _seed(env)
+    client = FakeClient(
+        {"extract": extracted(), "triage": triage or triaged(),
+         "cheap": cheap(), "format": rec or record()},
+        search_results={"cheap": {"https://a.example"}},
+    )
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env, **cfg_kw))
+    return client
+
+
+def _pages(env):
+    return sorted((env / "vault" / "Research Log").glob("*.md"))
+
+
+def test_a_second_window_on_the_same_topic_updates_one_page(env, monkeypatch):
+    """The whole point: research on a known subject lands on the page that
+    already covers it rather than opening a second one beside it."""
+    _run_window(env, monkeypatch)
+    _run_window(env, monkeypatch, dict(record(), answer="a later answer"))
+
+    assert len(_pages(env)) == 1, "a second page was opened for the same topic"
+    text = _pages(env)[0].read_text(encoding="utf-8")
+    assert "## Updates" in text
+    assert "a later answer" in text
+
+
+def test_an_update_appends_a_dated_entry_rather_than_replacing_the_page(env, monkeypatch):
+    _run_window(env, monkeypatch)
+    _run_window(env, monkeypatch, dict(record(), finding="refuted"))
+    text = _pages(env)[0].read_text(encoding="utf-8")
+    assert re.search(r"### \d{4}-\d{2}-\d{2}", text)
+    assert "unestablished → refuted" in text, "a reversal must be stated, not averaged"
+    assert text.count("last_verified:") == 1, "frontmatter was duplicated"
+
+
+def test_an_update_never_renames_the_page(env, monkeypatch):
+    """Same subject, later phrased differently. The filename is the wikilink
+    target, so it is frozen at creation and the new title is discarded."""
+    _run_window(env, monkeypatch)
+    before = _pages(env)[0].name
+    _run_window(env, monkeypatch, dict(record(), title="An entirely new phrasing"))
+    assert [p.name for p in _pages(env)] == [before]
+
+
+def test_a_record_with_no_topic_key_falls_back_to_one_derived_from_its_title(
+    env, monkeypatch
+):
+    """Deterministic, so a re-run of the same window makes the same decision."""
+    rec = record()
+    del rec["topic_key"]
+    _run_window(env, monkeypatch, rec)
+    assert "topic_key: research-q" in _pages(env)[0].read_text(encoding="utf-8")
+
+
+def test_a_hand_edited_page_is_never_overwritten_by_an_update(env, monkeypatch):
+    """kb-schema says the bot never edits a human-authored page, and pages
+    becoming living documents does not relax that."""
+    _run_window(env, monkeypatch)
+    page = _pages(env)[0]
+    page.write_text("a human rewrote this entirely", encoding="utf-8")
+
+    _run_window(env, monkeypatch, dict(record(), answer="the bot's new answer"))
+    assert page.read_text(encoding="utf-8") == "a human rewrote this entirely"
+    line = (env / "metrics.jsonl").read_text(encoding="utf-8")
+    assert '"updates_refused_hand_edited": 1' in line
+
+
+def test_a_refused_update_is_reported_rather_than_swallowed(env, monkeypatch):
+    _run_window(env, monkeypatch)
+    _pages(env)[0].write_text("edited by hand", encoding="utf-8")
+    _run_window(env, monkeypatch)
+    changelog = (env / "vault" / "Changelog").glob("*.md")
+    assert "edited by hand" in next(changelog).read_text(encoding="utf-8")
+
+
+def test_the_topic_key_reaches_the_page_so_the_index_can_be_rebuilt(env, monkeypatch):
+    _run_window(env, monkeypatch)
+    assert "topic_key:" in _pages(env)[0].read_text(encoding="utf-8")
+
+
+def test_every_run_appends_to_the_changelog(env, monkeypatch):
+    _run_window(env, monkeypatch)
+    logs = list((env / "vault" / "Changelog").glob("*.md"))
+    assert len(logs) == 1
+    text = logs[0].read_text(encoding="utf-8")
+    assert "**Created**" in text and "[[" in text
+
+
+def test_the_changelog_carries_no_window_id(env, monkeypatch):
+    """A window id is second-precision, and kb-schema bans a timestamp finer
+    than 15 minutes anywhere on a page."""
+    _run_window(env, monkeypatch)
+    text = next((env / "vault" / "Changelog").glob("*.md")).read_text(encoding="utf-8")
+    assert not re.search(r"\d{8}T\d{6}Z", text)
+
+
+def test_the_changelog_is_not_offered_to_triage_as_an_archive_entry(env, monkeypatch):
+    """It lives outside Research Log/, which is what digest() globs."""
+    _run_window(env, monkeypatch)
+    client = _run_window(env, monkeypatch)
+    triage_prompt = str(client.last_request.get("system", ""))
+    assert "Changelog" not in triage_prompt
+
+
+def test_no_file_the_batch_wrote_contains_a_speaker_label(env, monkeypatch):
+    """The catch-all. Every page and changelog line the run produced is fed back
+    through depersonalise, which is idempotent -- so any text that skipped the
+    strip makes the two differ. This catches a bypass in a code path that does
+    not exist yet, without needing to know that path exists."""
+    planted = dict(
+        record(),
+        answer="Participant B said the reserves are fine.",
+        headline="Participant A was right.",
+        title="What Participant C claimed about reserves",
+    )
+    _run_window(env, monkeypatch, planted)
+    _run_window(env, monkeypatch, dict(planted, answer="Participant D disagreed."))
+
+    written = list((env / "vault").rglob("*.md"))
+    assert written, "the run wrote nothing, so this test proves nothing"
+    for path in written:
+        text = path.read_text(encoding="utf-8")
+        assert depersonalise(text) == text, f"un-stripped speaker label in {path.name}"
+        assert not re.search(r"Participants?\s+[A-Z]\b", text)
+
+
+def test_triage_may_match_an_existing_topic_but_never_mint_one(env, monkeypatch):
+    """Triage is the only stage that sees the archive listing, so a key it
+    reproduces is one that exists. A key it invents is not stable across runs,
+    and 3b's is used instead."""
+    assert batch_mod.resolve_topic_key(
+        triage_key="reserves-audit", model_key="something-else",
+        title="T", known={"reserves-audit"},
+    ) == "reserves-audit"
+    assert batch_mod.resolve_topic_key(
+        triage_key="a-key-nobody-has", model_key="the-models-key",
+        title="T", known={"reserves-audit"},
+    ) == "the-models-key"
+
+
+def test_an_adopted_page_is_appended_to_rather_than_rewritten(env, monkeypatch):
+    """The bot has no record of what an adopted page says, so it must not
+    re-render one: it bumps the date and appends a dated entry, and leaves the
+    prose exactly as it found it."""
+    from signal_research_bot.kb.adopt import adopt
+
+    research_log = env / "vault" / "Research Log"
+    research_log.mkdir(parents=True, exist_ok=True)
+    legacy = research_log / "Reserves audit.md"
+    legacy.write_text(
+        "---\ntitle: Reserves audit\nlast_verified: 2026-01-01\n---\n\n"
+        "# Reserves audit\n\nProse a human would notice going missing.\n",
+        encoding="utf-8",
+    )
+    adopt(research_log)
+    key = next(iter(VaultIndex(research_log).load().keys()))
+
+    _run_window(env, monkeypatch, dict(record(), topic_key=key))
+
+    text = legacy.read_text(encoding="utf-8")
+    assert "Prose a human would notice going missing." in text
+    assert "## Updates" in text
+    assert "2026-01-01" not in text, "last_verified was not advanced"
+    assert len(_pages(env)) == 1, "a second page was opened beside the adopted one"
+
+
+def test_a_page_links_to_another_topic_that_shares_its_tags(env, monkeypatch):
+    """The vault had zero wikilinks: every note was an isolated graph vertex."""
+    _run_window(env, monkeypatch, dict(
+        record(), title="Reserves attestation scope", topic_key="reserves-scope",
+        tags=["reserves", "attestation"]))
+    _run_window(env, monkeypatch, dict(
+        record(), title="Audit firm engagement", topic_key="audit-firm",
+        tags=["reserves", "attestation"]))
+
+    later = next(p for p in _pages(env) if p.stem == "Audit firm engagement")
+    assert 'related: ["[[Reserves attestation scope]]"]' in later.read_text(
+        encoding="utf-8"
+    )
 
 
 # --- learning handles by watching --------------------------------------------

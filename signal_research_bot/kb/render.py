@@ -15,11 +15,16 @@ Pure functions: no filesystem, no clock, no network. The writer handles those.
 from __future__ import annotations
 
 import re
+import unicodedata
 from hashlib import sha256
 from typing import Any
 
 # Characters Obsidian and Windows will not accept in a filename.
-_UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+#
+# `#`, `[`, `]` and `^` are here because they break an Obsidian [[wikilink]]
+# even though Windows accepts them in a filename: a page whose name contains
+# one cannot be linked to, which matters now that pages link to each other.
+_UNSAFE = re.compile(r'[<>:"/\\|?*\[\]#^\x00-\x1f]')
 _WS = re.compile(r"\s+")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # A value that cannot change YAML's meaning: no quotes, colons, brackets,
@@ -45,6 +50,22 @@ MEMBER = "a group member"
 # A topical slug: lowercase, hyphenated, no '@', no underscores, no digits-only.
 # Deliberately excludes the shapes handles usually take.
 _TAG_SAFE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
+
+# A speaker label that has already been slugified ("participant-b"). depersonalise
+# only matches the prose form, "Participant B", so a model that writes a topic
+# key in slug form would slip a stable label past it and into a filename.
+_SPEAKER_SLUG = re.compile(r"(?<![a-z0-9])participants?-[a-z]{1,3}(?![a-z0-9])")
+
+TOPIC_KEY_MAX = 64
+
+# Windows refuses these as filenames whatever the extension -- "nul.md" is not
+# a file. They match the topical-slug shape, so they have to be excluded by
+# name rather than by charset.
+_RESERVED_STEMS = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
 
 
 def _scrub(text: str) -> str:
@@ -102,6 +123,43 @@ def slug(title: str, max_len: int = 120) -> str:
     return (cleaned[:max_len].rstrip() or "Untitled")
 
 
+def normalise_topic_key(value: Any) -> str | None:
+    """Coerce a model-authored topic key to a safe slug, or None if nothing survives.
+
+    The key joins new research to an existing page, so it ends up in a filename
+    lookup, in frontmatter, and in the digest the model is shown next window.
+    Three properties matter, and all three are enforced here rather than in the
+    schema -- structured outputs do not support `pattern` or `minLength`, and a
+    constraint the API strips is not a constraint at all. `tags` is handled the
+    same way for the same reason.
+
+    * **No traversal, by construction.** The output alphabet has no `.`, `/`,
+      `\\` or `:`, so a key cannot address a path outside the vault however it
+      was authored. That is stronger than a check someone can forget to call.
+    * **No participant.** A key is permanent and member-visible. `depersonalise`
+      catches "Participant B"; the slug pattern below catches "participant-b",
+      which it would not.
+    * **Readable.** The operator reads these while skimming the vault, and
+      `privacy-invariants` forbids a UUID-shaped string in a tracked file, so a
+      hash is out on both counts.
+    """
+    text = depersonalise(str(value or ""))
+    text = unicodedata.normalize("NFKC", text).lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = _SPEAKER_SLUG.sub("-", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-")
+    # A key must start with a letter: that keeps it clear of digits-only values
+    # and of anything that reads as a date.
+    text = text.lstrip("0123456789-")
+    if len(text) > TOPIC_KEY_MAX:
+        head = text[:TOPIC_KEY_MAX]
+        # Truncate at a hyphen so the key stays a whole word, not a fragment.
+        text = (head.rsplit("-", 1)[0] if "-" in head else head).strip("-")
+    if not text or text in _RESERVED_STEMS or not _TAG_SAFE.fullmatch(text):
+        return None
+    return text
+
+
 def title_for(question: str, month: str) -> str:
     condensed = _WS.sub(" ", question).strip().rstrip("?")
     if len(condensed) > 80:
@@ -145,7 +203,8 @@ def _yaml_list(values: list[str]) -> str:
 
 
 def frontmatter(record: dict[str, Any], *, title: str, first_raised: str,
-                last_verified: str, related: list[str] | None = None) -> str:
+                last_verified: str, related: list[str] | None = None,
+                topic_key: str = "") -> str:
     # Filtered on shape, not just trusted from the schema. An Obsidian tag is a
     # clickable index across the whole vault, so a handle landing here would
     # build a browsable page-set per person -- a worse outcome than the same
@@ -158,6 +217,10 @@ def frontmatter(record: dict[str, Any], *, title: str, first_raised: str,
             "---",
             f"title: {_yaml_str(title)}",
             "entity_type: research_task",
+            # On the page, not only in the index: it makes the index rebuildable
+            # from the vault alone with the same prefix scan digest() already
+            # does, so losing var/ or a sidecar costs nothing.
+            f"topic_key: {_yaml_str(topic_key)}",
             f"research_status: {_yaml_str(record['research_status'])}",
             f"finding: {_yaml_str(record.get('finding', 'unestablished'))}",
             f"confidence: {_yaml_str(record['confidence'])}",
@@ -194,14 +257,94 @@ def _bullets(items: list[str], empty: str) -> str:
     return "\n".join(f"- {i}" for i in items)
 
 
+def bump_last_verified(text: str, date: str) -> str | None:
+    """Advance `last_verified` in an existing page. None if it cannot be done safely.
+
+    For pages the bot wrote before it kept a record of their contents: it cannot
+    re-render them, so this changes one line and nothing else.
+
+    Deliberately not a parser. It matches one exact shape -- an unquoted ISO
+    date, on its own line, inside the frontmatter fences -- and refuses anything
+    else rather than guessing. A quoted value, a missing key, or a `last_verified`
+    in body text all return None, and the caller records the skip. The whole
+    reason this module never reads a page back is that a lenient reader of
+    human-edited YAML writes a wrong value into a permanent page.
+    """
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None
+    try:
+        end = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
+    except StopIteration:
+        return None
+    hits = [
+        i for i in range(1, end)
+        if re.fullmatch(r"last_verified: \d{4}-\d{2}-\d{2}", lines[i])
+    ]
+    if len(hits) != 1:
+        return None
+    lines[hits[0]] = f"last_verified: {date}"
+    return "\n".join(lines)
+
+
+def render_update_block(update: dict[str, Any]) -> str:
+    """One dated entry for a page's Updates section.
+
+    Depersonalises internally, and is the ONLY function that formats an update.
+    Both render() and the legacy append path call it, so there is no second
+    place where member-readable text is built. That matters more than it looks:
+    every depersonalisation guarantee in this codebase is a property of
+    render(), not of the writer, which takes an opaque string and writes bytes.
+    A path that formatted its own update block would bypass the strip entirely
+    -- and every existing test would stay green, because they all assert on
+    render()'s return value and none of them reads a file back.
+    """
+    update = depersonalise(update)
+    parts = [f"### {_cell(update.get('date', ''))}", ""]
+
+    headline = str(update.get("headline") or "").strip()
+    if headline:
+        parts += [headline, ""]
+
+    notes = [str(c).strip() for c in (update.get("changes") or []) if str(c).strip()]
+    if notes:
+        parts += [_bullets(notes, ""), ""]
+
+    sources = [str(u).strip() for u in (update.get("sources") or []) if str(u).strip()]
+    if sources:
+        parts += ["Sources added:", "", _bullets(sources, ""), ""]
+    return "\n".join(parts).rstrip() + "\n"
+
+
 def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
-           related: list[str] | None = None) -> tuple[str, str]:
-    """Return (filename_stem, markdown)."""
-    # Applied to the WHOLE record before anything is read out of it, so a field
-    # added to the schema later cannot bypass it by being rendered somewhere
-    # this function does not currently look. Covers the page body, the
-    # frontmatter, and -- via slug(title) -- the filename.
-    record = depersonalise(record)
+           related: list[str] | None = None, topic_key: str = "",
+           updates: list[dict[str, Any]] | None = None,
+           stem: str | None = None) -> tuple[str, str]:
+    """Return (filename_stem, markdown).
+
+    `stem` freezes the filename. An update passes the stem the page was created
+    with, because the filename is the wikilink target and renaming it breaks
+    every inbound link; only a create derives it from the title.
+    """
+    # Applied to EVERYTHING before anything is read out of it, so a field added
+    # to the schema later cannot bypass it by being rendered somewhere this
+    # function does not currently look. Covers the page body, the frontmatter,
+    # and -- via slug(title) -- the filename.
+    #
+    # `related` and `updates` are inside the same payload rather than
+    # depersonalised separately: as plain keyword arguments they went straight
+    # to _yaml_list and the body, which was a live bypass the moment either
+    # stopped being empty.
+    payload = depersonalise({
+        "record": record,
+        "related": list(related or []),
+        "updates": list(updates or []),
+        "topic_key": topic_key,
+    })
+    record = payload["record"]
+    related = payload["related"]
+    updates = payload["updates"]
+    topic_key = payload["topic_key"]
 
     # Collapsed once, here, so the frontmatter scalar, the H1 and the filename
     # all agree. A multi-line title otherwise produces a heading that silently
@@ -218,16 +361,17 @@ def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
     #
     # A short digest of the question disambiguates, and only when something was
     # actually stripped -- ordinary titles keep clean, readable filenames.
-    stem = slug(title)
-    if MEMBER in title:
-        digest = sha256(
-            str(record.get("question", "")).encode("utf-8")
-        ).hexdigest()[:6]
-        stem = slug(f"{title} ({digest})")
+    if stem is None:
+        stem = slug(title)
+        if MEMBER in title:
+            digest = sha256(
+                str(record.get("question", "")).encode("utf-8")
+            ).hexdigest()[:6]
+            stem = slug(f"{title} ({digest})")
     parts = [
         frontmatter(
             record, title=title, first_raised=first_raised,
-            last_verified=last_verified, related=related,
+            last_verified=last_verified, related=related, topic_key=topic_key,
         ),
         "",
         f"# {title}",
@@ -250,6 +394,12 @@ def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
         # should not have to read three sections to learn the result.
         parts += [f"**{headline}**", ""]
 
+    if updates:
+        # Plain text, not a Dataview query: Dataview is installed but not
+        # enabled in this vault family, so anything depending on it renders as
+        # source. See .claude/skills/kb-schema.
+        parts += [f"*Revised {updates[-1].get('date', '')} — see Updates below.*", ""]
+
     parts += [
         "## Question",
         "",
@@ -271,6 +421,16 @@ def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
         "",
         _bullets(record.get("open_questions") or [], "_None recorded._"),
         "",
+    ]
+
+    if updates:
+        # Append-only, oldest first, so the section reads chronologically and a
+        # reader sees how the finding moved rather than only where it landed.
+        parts += ["## Updates", ""]
+        for entry in updates:
+            parts += [render_update_block(entry), ""]
+
+    parts += [
         "## Provenance",
         "",
         "Raised in the group chat and researched automatically. "

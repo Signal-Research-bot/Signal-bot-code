@@ -17,6 +17,7 @@ Conventions below deliberately mirror CF so the two vaults feel like one system,
 ---
 title: Research - <question, condensed> - 2026-07-25
 entity_type: research_task          # alongside company / investment / source / person
+topic_key: reserves-attestation     # stable join key; lowercase-hyphenated, never a date or a person
 research_status: answered           # open | researching | answered | contested | dropped
 confidence: corroborated            # primary | corroborated | single-source | unverified
 first_raised: 2026-07-24
@@ -57,9 +58,12 @@ No `source_path`, no hostname, no local run ID, no absolute path, no message tim
 
 ## What the bot may and may not touch
 
-- **Creates only**, under `Research Log/` and `Sources and References/`. One file per record.
-- **Never edits a human-authored page.** Never edits a page it did not create.
-- Supersedes rather than rewrites: a corrected record links to the one it replaces and sets the old one's `research_status: dropped`.
+- **Creates and updates its own pages**, under `Research Log/`, `Sources and References/` and `Changelog/`. One file per **topic**, not per run: a page is a living document keyed on `topic_key`, and later research on the same subject updates it in place. This said "Creates only. One file per record" until that rule was found to produce unlinked near-duplicates whenever the model phrased a title differently, and to silently discard the research whenever it phrased one the same.
+- **Never edits a human-authored page.** Never edits a page it did not create. The bot stores a hash of the bytes it last wrote; if the file on disk differs, a person has been in it — the update is refused, logged, and recorded in the changelog for the operator to reconcile by hand. Unchanged, and load-bearing: the vault is a directory of notes a human also edits.
+- **An update never renames.** The filename and `title:` are frozen at creation and read from the topic index, never recomputed from a later, differently-phrased title. They are the wikilink target (see Naming below).
+- **An update is additive where it can be.** `last_verified` advances and the Answer carries the current finding; `sources`, `evidence`, `tags`, `contradictions` and `open questions` are unioned rather than replaced, `confidence` and `research_status` keep the stronger value, and every change appends a dated entry under `## Updates`. A recorded source or an unanswered question does not vanish because a later pass did not repeat it, and superseded prose stays recoverable in the vault's git history.
+- Supersedes rather than rewrites **across topics**: a record that replaces a *different* topic's entry links to the one it replaces and sets the old one's `research_status: dropped`. Within one topic, a correction is an update, not a second page.
+- Every create, update, refusal and collision is appended to `Changelog/YYYY-MM.md`, so what the bot did to the vault is auditable from inside Obsidian rather than only from the operator's local metrics file.
 - Writes atomically — temp file plus `os.replace()` — then commits. A half-written page in an Obsidian vault is visible immediately to anyone with the repo open.
 - Retracts on `remoteDelete` / `editMessage` upstream (see `signal-envelope`); the KB is not append-only-forever.
 
@@ -73,3 +77,5 @@ No `source_path`, no hostname, no local run ID, no absolute path, no message tim
 ## Naming
 
 `Research - <condensed question> - YYYY-MM`, mirroring CF's `Company - X`, `Investment - X in Y - YYYY-MM`, `Source - X - YYYY-MM` pattern. Keep titles stable — they are the wikilink target, and renaming breaks inbound links across both vaults.
+
+`topic_key`, not the title, is what joins later research to an existing page. So a page keeps the filename it was created with even when the same subject is raised again and phrased differently — the key matches, the title is discarded, and the link target survives.

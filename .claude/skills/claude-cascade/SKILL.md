@@ -27,10 +27,11 @@ Stages 3 and 3b are split defensively: citations and structured outputs have a d
 
 ## The gate — this is where the money is
 
-Two filters between stage 2 and anything expensive, both enforced **in code**, never by prompting:
+Three filters between stage 2 and anything expensive, all enforced **in code**, never by prompting:
 
-- `worth >= threshold` — starts strict. Banter, rhetorical questions, and anything already answered in the KB never reach a research stage.
+- `worth >= threshold` — starts strict. Banter, rhetorical questions, and anything already answered in the KB never reach a research stage. A subject the archive covers is revisited **only** when triage reports genuine `new_information`: a development, a contradiction, or a source the entry does not cite. A restatement is still dropped for free.
 - `max_tasks_per_window` — a hard integer cap. Take the top *N* by `worth`; log the remainder as deferred and surface them in the run summary. **Never truncate silently** — a silently dropped task reads as "nothing was missed".
+- `max_updates_per_window` — of that cap, how much may go on revisiting. An update clears the same threshold and the same cap as a fresh lead, and at equal worth a new subject outranks it, so "new information" cannot become an unbounded spend channel.
 
 Dropping a task costs nothing. Tightening the gate by one task per day saves more than the entire cheap-pass mechanism.
 
@@ -60,7 +61,7 @@ Prompt stage 2.5 to **prefer escalating**: *"if you are not confident this is se
 - `stop_reason:"refusal"` returns **HTTP 200 with a possibly empty `content` array**. Check `stop_reason` before touching `content[0]`. `stop_details` is populated only on refusal — guard it.
 - Empty search results mean *no results*, not an error. Mark `confidence: unverified`; do not retry.
 - Web search must be enabled org-wide in the Console. Request-level `allowed_domains` must be a **subset** of any org-level allowlist or the call 400s; `allowed_domains` and `blocked_domains` are mutually exclusive.
-- Every KB write is keyed on a task hash so a crashed run cannot double-write.
+- Every KB write is keyed on the record's `topic_key`, so a crashed run rewrites the same page rather than opening a second one beside it, and the writer reports whether it created, updated, left the page unchanged or refused. The batch counts only what it actually wrote. This bullet used to say "keyed on a task hash", which was never true of anything the code did: the key was the model-authored title, and two records condensing to one title meant the second was silently discarded and announced as written.
 - Batch API rejects `fallbacks`, `stream:true`, and `speed`. A batched stage 3 cannot auto-recover from a refusal — re-queue refused tasks synchronously.
 
 ## Cost discipline

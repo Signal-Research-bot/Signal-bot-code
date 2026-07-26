@@ -115,6 +115,20 @@ routes it to a stronger model regardless of anything downstream.
 `duplicate_of` must name an existing archive entry only when the SAME question \
 is already answered there. A related entry is not a duplicate.
 
+The archive listing shows a key for each entry. When a lead is about a subject \
+already listed, put that key in `topic_key`, copied EXACTLY. Otherwise leave it \
+null -- never invent one. The key is how later research reaches the existing \
+page instead of opening a second one beside it.
+
+`new_information` decides whether an existing entry is revisited at all, and it \
+is the only way that ever happens. Set it ONLY when the conversation raises \
+something the entry does not already contain: a development since it was \
+written, a claim that contradicts its recorded finding, or a source it does not \
+cite. Null is the normal answer. People restate things they have already \
+discussed, and restating what the archive already says is not new information \
+-- researching it again costs real money and appends a dated entry that adds \
+nothing.
+
 Be strict. Dropping a weak question costs nothing; researching one costs real \
 money and clutters the archive."""
 
