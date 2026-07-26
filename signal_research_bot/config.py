@@ -77,6 +77,8 @@ class Config:
     cache_path: Path
     cache_key: str | None
     roster_path: Path
+    observed_handles_path: Path
+    auto_handles: bool
     pseudonyms_path: Path
     quarantine_dir: Path
     metrics_path: Path
@@ -101,6 +103,8 @@ class Config:
             cache_path=cache_dir / "messages.db",
             cache_key=os.environ.get("SRB_CACHE_KEY") or None,
             roster_path=var_dir / "roster.json",
+            observed_handles_path=var_dir / "observed-handles.json",
+            auto_handles=os.environ.get("SRB_AUTO_HANDLES", "1") not in ("0", "false", "no"),
             pseudonyms_path=var_dir / "pseudonyms.json",
             quarantine_dir=var_dir / "quarantine",
             metrics_path=var_dir / "metrics.jsonl",

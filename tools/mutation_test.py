@@ -38,7 +38,8 @@ RENDER = REPO_ROOT / "signal_research_bot" / "kb" / "render.py"
 IDENTITY = REPO_ROOT / "signal_research_bot" / "identity.py"
 SUITE = (
     "tests/test_egress.py tests/test_client.py tests/test_transcript.py "
-    "tests/test_envelope.py tests/test_redact.py tests/test_kb.py"
+    "tests/test_envelope.py tests/test_redact.py tests/test_kb.py "
+    "tests/test_batch.py tests/test_identity.py"
 )
 
 
@@ -211,6 +212,18 @@ MUTATIONS: tuple[Mutation, ...] = (
         "redaction ignores handles entirely",
         "        return self.name_variants() | self.handle_variants()",
         "        return self.name_variants()",
+        IDENTITY,
+    ),
+    Mutation(
+        "observed handles are trusted without vetting",
+        "            if rate > AUTO_HANDLE_MAX_HIT_RATE:",
+        "            if False:",
+        IDENTITY,
+    ),
+    Mutation(
+        "every observed handle is rejected (learning does nothing)",
+        "        accepted.append(handle)",
+        "        rejected[raw] = 'disabled'",
         IDENTITY,
     ),
 )

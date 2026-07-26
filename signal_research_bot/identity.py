@@ -24,11 +24,12 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import secrets
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 SERVICE = "signal-research-bot"
 KEY_NAME = "pseudonym-key"
@@ -307,6 +308,79 @@ class PseudonymStore:
 def allowed_labels(count: int) -> set[str]:
     """The full set of labels the egress firewall will accept."""
     return {_label_for_index(i) for i in range(count)}
+
+
+# --- learning handles by watching -------------------------------------------
+
+AUTO_HANDLE_MIN_LEN = 4
+# A handle appearing in more than this share of a window's messages is far more
+# likely to be an ordinary word than a name anyone is being called.
+AUTO_HANDLE_MAX_HIT_RATE = 0.25
+# Below this many messages the hit rate is too noisy to judge, so a handle is
+# accepted rather than rejected on a sample of three.
+AUTO_HANDLE_MIN_SAMPLE = 12
+
+
+def load_observed_handles(path: Path) -> tuple[str, ...]:
+    """Display names the receiver has seen, or () if none recorded yet."""
+    if not path.exists():
+        return ()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return ()
+    return tuple(str(h) for h in (raw.get("observed") or ()) if str(h).strip())
+
+
+def vet_auto_handles(
+    observed: Iterable[str], bodies: Sequence[str]
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Decide which observed display names are safe to redact automatically.
+
+    Returns (accepted, {rejected: reason}).
+
+    Watching the group is how this tool learns what members are called, because
+    in a pseudonymous group the operator cannot supply that list. But a display
+    name is attacker-controlled and, more often, simply unlucky: anyone can call
+    themselves "Tether", "reserves" or "audit". Trusting that blindly would
+    redact the subject matter out of the archive -- silently, and in a way that
+    looks like the research merely came up empty.
+
+    The discriminator is frequency, not a word list. A word list would need
+    maintaining, would be wrong for this domain within a month, and would still
+    miss the specific term this group happens to care about. How often a token
+    appears in the conversation answers the question directly: in a group of
+    eight, no one member's name is in a quarter of all messages, whereas an
+    ordinary word easily is.
+
+    Rejection is not a failure. It means that person's handle stays visible in
+    the transcript, which is the same position as having no roster at all --
+    and the operator can always list it explicitly in roster.json, where it is
+    trusted without vetting because a human chose it.
+    """
+    accepted: list[str] = []
+    rejected: dict[str, str] = {}
+    lowered = [b.lower() for b in bodies]
+
+    for raw in observed:
+        handle = raw.strip().lstrip("@")
+        if len(handle) < AUTO_HANDLE_MIN_LEN:
+            rejected[raw] = f"shorter than {AUTO_HANDLE_MIN_LEN} characters"
+            continue
+
+        pattern = re.compile(rf"(?<!\w){re.escape(handle.lower())}(?!\w)")
+        hits = sum(1 for body in lowered if pattern.search(body))
+        if len(bodies) >= AUTO_HANDLE_MIN_SAMPLE:
+            rate = hits / len(bodies)
+            if rate > AUTO_HANDLE_MAX_HIT_RATE:
+                rejected[raw] = (
+                    f"appears in {rate:.0%} of messages; reads as an ordinary "
+                    f"word rather than a name"
+                )
+                continue
+        accepted.append(handle)
+
+    return tuple(accepted), rejected
 
 
 def is_opted_out(roster: Roster, aci: str | None) -> bool:

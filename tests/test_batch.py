@@ -69,6 +69,10 @@ class FakeClient:
     # is the whole point of the grounding control.
     search_results: dict[str, set] = field(default_factory=dict)
     last_retrieved_urls: set = field(default_factory=set)
+    # The most recent outbound request. Needed to assert on what actually left
+    # the machine -- a test that only checks the return value cannot tell
+    # whether redaction ran.
+    last_request: dict[str, Any] = field(default_factory=dict)
 
     def _stage_of(self, request: dict) -> str:
         """Identify the stage from its prompt.
@@ -87,6 +91,7 @@ class FakeClient:
     def _resolve(self, request: dict):
         stage = self._stage_of(request)
         self.calls.append(stage)
+        self.last_request = request
         self.last_retrieved_urls = set(self.search_results.get(stage, set()))
         value = self.responses.get(stage)
         if isinstance(value, Exception):
@@ -107,6 +112,8 @@ def cfg_for(tmp_path: Path, **kw) -> Config:
         signal_host="h", signal_port=1, group_id=GROUP,
         cache_path=tmp_path / "c.db", cache_key=None,
         roster_path=tmp_path / "roster.json",
+        observed_handles_path=tmp_path / "observed-handles.json",
+        auto_handles=True,
         pseudonyms_path=tmp_path / "p.json",
         quarantine_dir=tmp_path / "q",
         metrics_path=tmp_path / "metrics.jsonl",
@@ -498,3 +505,103 @@ def test_a_failed_task_leaves_its_question_behind(env, monkeypatch):
     batch_mod.run(cfg_for(env))
     line = (env / "metrics.jsonl").read_text(encoding="utf-8")
     assert '"unfinished_questions": ["q0"]' in line
+
+
+# --- learning handles by watching --------------------------------------------
+
+
+def _observed(env, *names):
+    (env / "observed-handles.json").write_text(
+        json.dumps({"observed": list(names)}), encoding="utf-8"
+    )
+
+
+def test_an_observed_handle_is_redacted_without_the_operator_doing_anything(
+    env, monkeypatch
+):
+    """The whole point: in a pseudonymous group the operator cannot supply the
+    deny-list, so the receiver watches and the batch uses what it saw."""
+    _observed(env, "zeropoint_x")
+    cache = Cache.open(env / "c.db", None, allow_plaintext=True)
+    ts = TS + 10 * 60_000
+    cache.add(ParsedMessage(
+        kind=Kind.MESSAGE, group_id=GROUP, source=ALICE,
+        timestamp_ms=ts - (ts % (15 * 60 * 1000)),
+        body="zeropoint_x says the attestation is fine", raw_timestamp_ms=ts,
+    ))
+    cache.close()
+
+    client = FakeClient({"extract": {"tasks": []}})
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env))
+
+    sent = str(client.last_request)
+    assert "zeropoint_x" not in sent
+    assert "[participant]" in sent
+
+
+def test_a_handle_that_is_really_an_ordinary_word_is_not_used(env, monkeypatch):
+    """A display name is attacker-controlled and, more often, simply unlucky.
+    Someone calling themselves "reserves" would otherwise have that word
+    redacted out of every page -- silently, looking like the research just came
+    up empty. Frequency is the discriminator, so no word list has to be kept."""
+    _observed(env, "reserves")
+    cache = Cache.open(env / "c.db", None, allow_plaintext=True)
+    for i in range(14):
+        ts = TS + (i + 5) * 60_000
+        cache.add(ParsedMessage(
+            kind=Kind.MESSAGE, group_id=GROUP, source=ALICE,
+            timestamp_ms=ts - (ts % (15 * 60 * 1000)),
+            body=f"the reserves report {i} looks wrong", raw_timestamp_ms=ts,
+        ))
+    cache.close()
+
+    client = FakeClient({"extract": {"tasks": []}})
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env))
+
+    assert "reserves" in str(client.last_request), (
+        "the subject matter was redacted out of the research"
+    )
+    line = (env / "metrics.jsonl").read_text(encoding="utf-8")
+    assert '"auto_handles_rejected": 1' in line
+
+
+def test_a_hand_listed_handle_is_never_vetted(env, monkeypatch):
+    """A human chose it, which beats any heuristic here. If the operator says
+    a member is called "reserves", that is the operator's call to make."""
+    (env / "roster.json").write_text(
+        json.dumps({"handles": ["reserves"], "group_name": "Ravenhill"}),
+        encoding="utf-8",
+    )
+    cache = Cache.open(env / "c.db", None, allow_plaintext=True)
+    for i in range(14):
+        ts = TS + (i + 5) * 60_000
+        cache.add(ParsedMessage(
+            kind=Kind.MESSAGE, group_id=GROUP, source=ALICE,
+            timestamp_ms=ts - (ts % (15 * 60 * 1000)),
+            body=f"the reserves report {i}", raw_timestamp_ms=ts,
+        ))
+    cache.close()
+
+    client = FakeClient({"extract": {"tasks": []}})
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env))
+    assert "reserves" not in str(client.last_request)
+
+
+def test_auto_handles_can_be_switched_off(env, monkeypatch):
+    _observed(env, "zeropoint_x")
+    cache = Cache.open(env / "c.db", None, allow_plaintext=True)
+    ts = TS + 10 * 60_000
+    cache.add(ParsedMessage(
+        kind=Kind.MESSAGE, group_id=GROUP, source=ALICE,
+        timestamp_ms=ts - (ts % (15 * 60 * 1000)),
+        body="zeropoint_x said so", raw_timestamp_ms=ts,
+    ))
+    cache.close()
+
+    client = FakeClient({"extract": {"tasks": []}})
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env, auto_handles=False))
+    assert "zeropoint_x" in str(client.last_request)

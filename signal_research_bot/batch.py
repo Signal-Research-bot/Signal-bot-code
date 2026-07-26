@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from .cache import Cache, CacheEncryptionUnavailable
@@ -26,7 +27,14 @@ from .claude.client import AnthropicTransport, Client, Refusal
 from .config import Config, ConfigError
 from .egress import EgressViolation, Policy, check_outbound
 from .gate import allowed_urls, apply_gate, reject_ungrounded, should_escalate
-from .identity import KeyUnavailable, PseudonymStore, Roster, load_or_create_key
+from .identity import (
+    KeyUnavailable,
+    PseudonymStore,
+    Roster,
+    load_observed_handles,
+    load_or_create_key,
+    vet_auto_handles,
+)
 from .kb.render import depersonalise, render, title_for
 from .kb.writer import VaultError, VaultWriter, git_commit
 from .logging_setup import configure
@@ -41,7 +49,6 @@ log = logging.getLogger(__name__)
 def run(cfg: Config, *, dry_run: bool = False) -> int:
     roster = Roster.load(cfg.roster_path)
     pseudonyms = PseudonymStore(load_or_create_key(), cfg.pseudonyms_path)
-    builder = Builder(roster, pseudonyms, Redactor(roster=roster))
 
     cache = Cache.open(cfg.cache_path, cfg.cache_key)
     messages = cache.pending()
@@ -49,6 +56,40 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         log.info("nothing pending; window is empty")
         return 0
 
+    # Learn what members are called by watching, rather than requiring the
+    # operator to know. In a pseudonymous group they cannot supply the list, so
+    # the receiver records the display name Signal attaches to each message and
+    # this merges the safe ones into the deny-list automatically.
+    #
+    # Vetted first, because a display name is attacker-controlled and, more
+    # often, simply unlucky. Anyone can call themselves "Tether"; trusting that
+    # would redact the subject matter out of the archive silently, in a way that
+    # looks like the research merely came up empty. See vet_auto_handles.
+    #
+    # Anything listed by hand in roster.json is used as-is and never vetted: a
+    # human chose it, which is a stronger signal than any heuristic here.
+    auto_rejected: dict[str, str] = {}
+    if cfg.auto_handles:
+        observed = load_observed_handles(cfg.observed_handles_path)
+        if observed:
+            auto, auto_rejected = vet_auto_handles(
+                observed, [m.body for m in messages]
+            )
+            roster = replace(roster, handles=tuple({*roster.handles, *auto}))
+            log.info(
+                "merged observed handles into the deny-list",
+                extra={"accepted": len(auto), "rejected": len(auto_rejected)},
+            )
+            for handle, reason in auto_rejected.items():
+                # Never silent: a rejected handle means that person stays
+                # visible in the transcript, and the operator can override by
+                # listing it in roster.json by hand.
+                log.warning(
+                    "observed handle not used automatically",
+                    extra={"reason": reason},
+                )
+
+    builder = Builder(roster, pseudonyms, Redactor(roster=roster))
     transcript = builder.build(messages)
     window_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -91,6 +132,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         # longer refuses to run: without this, a window with no deny-list at all
         # would look identical in the metrics to a fully covered one.
         "roster_coverage": roster.coverage(),
+        "auto_handles_rejected": len(auto_rejected),
     }
 
     # --- stage 1 + 2 ---------------------------------------------------------
