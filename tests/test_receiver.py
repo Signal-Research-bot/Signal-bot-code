@@ -311,3 +311,15 @@ def test_one_poison_frame_does_not_kill_the_receiver(tmp_path):
     assert calls["n"] == 2, "the loop stopped at the poison frame"
     assert len(cache.pending()) == 1, "the message after the poison one was lost"
     cache.close()
+
+
+def test_the_opt_out_marker_is_case_insensitive(tmp_path):
+    """The marker is documented to members as a per-message opt-out. Someone
+    typing "[Research-Bot]" plainly meant to use it; an exact-case match
+    silently ingested the message they were trying to keep out."""
+    cache = Cache.open(tmp_path / "c.db", None, allow_plaintext=True)
+    r = Receiver("h", 1, GROUP, cache)
+    r._handle(notification("[Research-Bot] please skip this"))
+    assert r.stats.dropped_bot_echo == 1
+    assert cache.pending() == []
+    cache.close()

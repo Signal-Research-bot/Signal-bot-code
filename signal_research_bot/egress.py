@@ -60,6 +60,12 @@ UUID_RE = re.compile(
     r"-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])",
     re.I,
 )
+# A Signal ACI with the dashes removed. Both UUID rules required the dashes, so
+# the raw 32-hex form -- which is how a UUID appears in a URL, a log line, or
+# anything that pasted it through a system that strips punctuation -- passed
+# straight through. An ACI is the one identifier the pseudonym scheme is built
+# on, so it is the last thing that should leave in any form.
+UUID_COMPACT_RE = re.compile(r"(?<![0-9a-zA-Z])[0-9a-f]{32}(?![0-9a-zA-Z])", re.I)
 E164_RE = re.compile(r"(?<![\w+])\+[1-9]\d{7,14}(?![\w])")
 SEPARATED_PHONE_RE = re.compile(
     r"(?<![\w])(?:\+\d[\d\s().-]{6,17}\d|0\d[\d\s().-]{6,15}\d"
@@ -178,6 +184,7 @@ def _assert_no_identity_shapes(text: str, sha: str) -> None:
     """
     for rule, pattern in (
         ("uuid", UUID_RE),
+        ("uuid-compact", UUID_COMPACT_RE),
         ("email", EMAIL_RE),
         ("e164-phone", E164_RE),
     ):

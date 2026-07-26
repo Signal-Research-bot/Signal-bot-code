@@ -370,3 +370,25 @@ def test_a_roster_phone_in_arabic_digits_is_still_recognised():
     with pytest.raises(EgressViolation) as caught:
         check_outbound({"messages": [{"role": "user", "content": arabic}]}, pol)
     assert caught.value.rule == "roster-phone"
+
+
+def test_an_aci_without_dashes_is_blocked(policy):
+    """Both UUID rules required the dashes, so the raw 32-hex form -- how a
+    UUID appears in a URL or after anything that strips punctuation -- went
+    straight through. The ACI is the identifier the whole pseudonym scheme
+    rests on."""
+    undashed = str(uuid.UUID(int=0xA11CE)).replace("-", "")
+    with pytest.raises(EgressViolation) as caught:
+        check_outbound({"messages": [{"role": "user", "content": undashed}]}, policy)
+    assert caught.value.rule == "uuid-compact"
+
+
+def test_a_sha256_and_an_eth_address_are_not_mistaken_for_an_aci(policy):
+    """Both are research payload in this archive. The compact-UUID rule is
+    pinned to exactly 32 hex characters with boundary assertions."""
+    check_outbound(
+        {"messages": [{"role": "user", "content": "tx " + "ab" * 32}]}, policy
+    )
+    check_outbound(
+        {"messages": [{"role": "user", "content": "addr 0x" + "ab" * 20}]}, policy
+    )

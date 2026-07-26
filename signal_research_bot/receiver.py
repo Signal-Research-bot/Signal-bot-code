@@ -146,7 +146,11 @@ class Receiver:
             self.stats.other_group += 1
             return
 
-        if BOT_MARKER in msg.body:
+        # Case-insensitive: this marker is documented to members as a
+        # per-message opt-out, and someone typing "[Research-Bot]" plainly meant
+        # to use it. An exact-case match would silently ingest the message they
+        # were trying to keep out.
+        if BOT_MARKER in msg.body.lower():
             self.stats.dropped_bot_echo += 1
             return
 

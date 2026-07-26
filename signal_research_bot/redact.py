@@ -74,6 +74,14 @@ UUID_RE = re.compile(
     r"-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])",
     re.I,
 )
+# The same value with the dashes stripped -- how a UUID appears in a URL, or
+# after passing through anything that removes punctuation. Both UUID rules
+# required the dashes, so this form went through untouched.
+#
+# Deliberately NOT applied to bare hex generally: a 64-character SHA-256 and a
+# 40-character Ethereum address are research payload in this archive, and the
+# boundary assertions keep this to exactly 32.
+UUID_COMPACT_RE = re.compile(r"(?<![0-9a-zA-Z])[0-9a-f]{32}(?![0-9a-zA-Z])", re.I)
 # ISO 13616 shape: 2 letters, 2 check digits, then 11-30 alphanumerics, which
 # may be written in groups of four. Matching fixed 4-char groups fails on the
 # common unspaced form, whose tail is not a multiple of four.
@@ -273,6 +281,7 @@ class Redactor:
         for name, pattern, placeholder in (
             ("email", EMAIL_RE, PLACEHOLDER_EMAIL),
             ("uuid", UUID_RE, PLACEHOLDER_UUID),
+            ("uuid-compact", UUID_COMPACT_RE, PLACEHOLDER_UUID),
             ("iban", IBAN_RE, PLACEHOLDER_IBAN),
         ):
             if pattern.search(text):
