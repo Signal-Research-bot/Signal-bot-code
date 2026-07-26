@@ -36,7 +36,25 @@ HAIKU = "claude-haiku-4-5"
 # when a pinned fallback is retired.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
+# Two web-search tool versions, and picking the wrong one is a 400 rather than
+# a degraded result.
+#
+# `web_search_20260209` adds dynamic filtering and is available on Opus 5 /
+# 4.8 / 4.7 / 4.6, Fable 5, Sonnet 5 and Sonnet 4.6 -- NOT on Haiku 4.5, which
+# is exactly the model the cheap research stage uses. Sending it there rejects
+# every task in the window, and because the failure surfaces as a
+# BadRequestError rather than a Refusal it was not caught by the per-task
+# handler either: the window would end having written nothing, and exit 0.
 WEB_SEARCH_TOOL = "web_search_20260209"
+WEB_SEARCH_TOOL_BASIC = "web_search_20250305"
+DYNAMIC_FILTER_MODELS = frozenset({OPUS, SONNET})
+# Models that accept output_config.effort. Haiku 4.5 does not.
+EFFORT_MODELS = frozenset({OPUS, SONNET})
+
+
+def web_search_tool_for(model: str) -> str:
+    """The search tool version this model actually accepts."""
+    return WEB_SEARCH_TOOL if model in DYNAMIC_FILTER_MODELS else WEB_SEARCH_TOOL_BASIC
 
 
 class Refusal(RuntimeError):
@@ -243,11 +261,23 @@ def search_request(
         "max_tokens": max_tokens,
         "system": system,
         "messages": [{"role": "user", "content": user}],
-        "tools": [{"type": WEB_SEARCH_TOOL, "name": "web_search", "max_uses": max_uses}],
-        "output_config": {"effort": effort},
+        "tools": [
+            {
+                "type": web_search_tool_for(model),
+                "name": "web_search",
+                "max_uses": max_uses,
+            }
+        ],
+        "output_config": {},
     }
+    # `effort` is not universal either -- sending it to a model that does not
+    # take it is a 400, not a silently ignored field.
+    if model in EFFORT_MODELS:
+        request["output_config"]["effort"] = effort
     if schema is not None:
         request["output_config"]["format"] = {"type": "json_schema", "schema": schema}
+    if not request["output_config"]:
+        del request["output_config"]
     if adaptive_thinking:
         request["thinking"] = {"type": "adaptive"}
     if with_fallbacks:

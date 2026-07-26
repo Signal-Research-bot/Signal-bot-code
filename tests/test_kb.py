@@ -358,3 +358,60 @@ def test_speaker_labels_are_stripped_from_list_and_nested_fields():
     _, md = render(rec, first_raised="2026-07-24", last_verified="2026-07-25")
     assert not re.search(r"Participants?\s+[A-Z]\b", md)
     assert md.count("a group member") == 3
+
+
+def test_a_source_url_containing_an_at_sign_is_not_corrupted():
+    """_AT_HANDLE fired on the '/@user' segment of a link, so
+    "https://x.com/@coinmetrics/status/1" became
+    "https://x.com/a group member/status/1". That corrupts the citation -- the
+    whole point of the archive -- and the mangled URL then fails the grounding
+    check, so the evidence is dropped as a fabrication too."""
+    # Two shapes that fail differently. The '/@user' form is caught by the
+    # lookbehind alone; the query-string and fragment forms are NOT, because
+    # '=' and '#' are neither word characters nor '@' nor '/'. Only carving
+    # URLs out entirely protects those. Mutation testing caught that the first
+    # case on its own proved nothing.
+    for url in (
+        "https://x.com/@coinmetrics/status/123",
+        "https://example.gov/search?author=@filer&y=2024",
+        "https://example.gov/doc#@section",
+    ):
+        _, md = render(
+            record(evidence=[{"url": url, "quote": "q", "confidence": "primary"}]),
+            first_raised="2026-07-26", last_verified="2026-07-26",
+        )
+        assert url in md, f"corrupted: {url}"
+
+
+def test_an_at_handle_in_prose_is_still_stripped():
+    """The counterweight to carving URLs out."""
+    _, md = render(
+        record(answer="@zeropoint_x said the attestation is weak"),
+        first_raised="2026-07-26", last_verified="2026-07-26",
+    )
+    assert "zeropoint_x" not in md
+
+
+def test_two_entries_depersonalised_to_the_same_title_do_not_collide():
+    """depersonalise runs before slug(), so distinct titles collapsed onto one
+    filename. VaultWriter treats an existing path as idempotency and skips, so
+    the second entry was silently discarded while batch counted it as written
+    and announced it to the group."""
+    a, _ = render(
+        record(title="Research - Participant A on reserves - 2026-07", question="q1"),
+        first_raised="2026-07-26", last_verified="2026-07-26",
+    )
+    b, _ = render(
+        record(title="Research - Participant B on reserves - 2026-07", question="q2"),
+        first_raised="2026-07-26", last_verified="2026-07-26",
+    )
+    assert a != b
+
+
+def test_an_ordinary_title_keeps_a_clean_filename():
+    """The disambiguator must only appear when something was actually stripped."""
+    stem, _ = render(
+        record(title="Research - are the reserves audited - 2026-07"),
+        first_raised="2026-07-26", last_verified="2026-07-26",
+    )
+    assert stem == "Research - are the reserves audited - 2026-07"

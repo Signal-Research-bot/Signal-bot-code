@@ -179,6 +179,56 @@ def fold_confusables(text: str) -> str:
     return "".join(out)
 
 
+def looks_like_phone(text: str) -> bool:
+    """True if a phone-SHAPED candidate is actually a phone number.
+
+    The shape rules alone are not safe in this archive. A SEC EDGAR accession
+    number (`0001193125-24-206789`) and a CIK (`0000320193`) both match the
+    separated-phone and trunk-zero shapes exactly, and those identifiers are
+    the single most likely thing to appear in a chat about company filings.
+
+    That was not a cosmetic false positive. The firewall blocked the window, and
+    a blocked window is *consumed* rather than retried -- so one EDGAR link
+    destroyed every message in that batch, permanently and silently. The two
+    behaviours were each defensible alone and catastrophic together.
+
+    Three checks, cheapest first:
+
+    * More than 15 digits cannot be a phone number: E.164 caps the whole
+      international number at 15. This alone rejects every accession number.
+    * Read as an international number, is it assignable? Catches anything
+      written with a country code.
+    * Read as a national number in a plausible region, is it assignable? This
+      is what keeps "020 7925 0918" caught, since it cannot be validated
+      internationally without a region hint.
+    """
+    import phonenumbers  # noqa: PLC0415
+
+    digits = re.sub(r"[^0-9]", "", text)
+    if not 7 <= len(digits) <= 15:
+        return False
+
+    # A leading "+" is unambiguous: nothing in this archive's subject matter is
+    # written that way, so the shape alone is enough and validity is not
+    # consulted. This matters because the ranges reserved for fiction
+    # (+44 7700 900xxx, +1 555) are deliberately NOT assignable, so a validity
+    # check rejects exactly the numbers used in documentation and tests -- and,
+    # more importantly, would let a real number through if libphonenumber's
+    # tables happen to be behind on a new range.
+    if text.lstrip().startswith("+"):
+        return True
+
+    if is_dialable(digits):
+        return True
+    for region in ("GB", "US"):
+        try:
+            if phonenumbers.is_valid_number(phonenumbers.parse(text, region)):
+                return True
+        except Exception:  # noqa: BLE001 - unparseable is not a phone number
+            continue
+    return False
+
+
 def is_dialable(digits: str) -> bool:
     """True if a bare run of digits is a real, assignable phone number.
 
@@ -294,9 +344,11 @@ class Redactor:
             except Exception:  # noqa: BLE001 - matcher is best-effort per region
                 continue
         for m in LOOSE_PHONE_RE.finditer(text):
-            digits = sum(c.isdigit() for c in m.group())
-            # >= 9 so an ISO date (8 digits) is not read as a phone number.
-            if 9 <= digits <= 15:
+            # Shape is necessary but not sufficient. A CIK typed into chat has
+            # the trunk-zero shape and is research payload, not a phone number;
+            # turning "0000320193" into "[phone]" guts the archive's own subject
+            # matter. looks_like_phone() decides.
+            if looks_like_phone(m.group()):
                 spans.append((m.start(), m.end()))
 
         for m in BARE_DIGIT_RUN_RE.finditer(text):

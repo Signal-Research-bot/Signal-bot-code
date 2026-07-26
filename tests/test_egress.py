@@ -430,3 +430,35 @@ def test_real_names_ARE_compiled_into_the_firewall():
         check_outbound(
             {"messages": [{"role": "user", "content": "Anna Smith said so"}]}, policy
         )
+
+
+def test_a_sec_filing_identifier_does_not_block_the_window(policy):
+    """The most damaging defect found before launch.
+
+    SEPARATED_PHONE_RE matched an EDGAR accession number and a CIK, so the
+    firewall blocked the window -- and because a blocked window is CONSUMED
+    rather than retried, one SEC link in a chat about company filings destroyed
+    that entire batch of messages, permanently and silently. Two separately
+    reasonable decisions that combined into data loss.
+
+    These identifiers are the single most likely artefact in this archive's
+    subject matter, so this is the regression that matters most.
+    """
+    for identifier in (
+        "0001193125-24-206789",                 # EDGAR accession number
+        "0000320193",                           # CIK
+        "CIK 0001067983",
+        "https://www.sec.gov/Archives/edgar/data/1193125/000119312524206789.htm",
+    ):
+        check_outbound(
+            {"messages": [{"role": "user", "content": identifier}]}, policy
+        )
+
+
+def test_real_phone_numbers_are_still_blocked_after_that_fix(policy):
+    """The counterweight: loosening the phone rules must not open a hole."""
+    for number in ("+44 20 7925 0918", "020 7925 0918", "+1 212 555 0198"):
+        with pytest.raises(EgressViolation):
+            check_outbound(
+                {"messages": [{"role": "user", "content": number}]}, policy
+            )

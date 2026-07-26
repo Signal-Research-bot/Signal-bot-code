@@ -272,3 +272,28 @@ def test_kb_record_requires_contradictions_and_open_questions():
     """Empty must mean 'looked and found none', never 'did not look'."""
     assert "contradictions" in schemas.KB_RECORD["required"]
     assert "open_questions" in schemas.KB_RECORD["required"]
+
+
+def test_haiku_gets_the_search_tool_version_it_actually_accepts():
+    """web_search_20260209 (dynamic filtering) is available on Opus 5/4.8/4.7/
+    4.6, Fable 5, Sonnet 5 and Sonnet 4.6 -- not on Haiku 4.5, which is exactly
+    what the cheap research stage uses. Sending it there is a 400 on every task,
+    and because a BadRequestError is not a Refusal it was not caught by the
+    per-task handler either: the window ended having written nothing, exit 0."""
+    from signal_research_bot.claude import stages
+
+    cheap = stages.cheap_research("q", "r")
+    assert cheap["model"] == HAIKU
+    assert cheap["tools"][0]["type"] == "web_search_20250305"
+    assert "effort" not in cheap.get("output_config", {}), (
+        "Haiku 4.5 does not accept output_config.effort"
+    )
+
+
+def test_opus_still_gets_dynamic_filtering_and_effort():
+    from signal_research_bot.claude import stages
+
+    deep = stages.deep_research("q", "why", "notes")
+    assert deep["model"] == OPUS
+    assert deep["tools"][0]["type"] == "web_search_20260209"
+    assert deep["output_config"]["effort"] == "high"

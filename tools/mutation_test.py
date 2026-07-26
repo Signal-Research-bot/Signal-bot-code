@@ -36,6 +36,7 @@ TRANSCRIPT = REPO_ROOT / "signal_research_bot" / "transcript.py"
 ENVELOPE = REPO_ROOT / "signal_research_bot" / "envelope.py"
 RENDER = REPO_ROOT / "signal_research_bot" / "kb" / "render.py"
 IDENTITY = REPO_ROOT / "signal_research_bot" / "identity.py"
+REDACT = REPO_ROOT / "signal_research_bot" / "redact.py"
 SUITE = (
     "tests/test_egress.py tests/test_client.py tests/test_transcript.py "
     "tests/test_envelope.py tests/test_redact.py tests/test_kb.py "
@@ -181,8 +182,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "@handles no longer stripped from pages",
-        "        return _AT_HANDLE.sub(MEMBER, out)",
-        "        return out",
+        "    return _AT_HANDLE.sub(MEMBER, _SPEAKER.sub(MEMBER, text))",
+        "    return _SPEAKER.sub(MEMBER, text)",
         RENDER,
     ),
     Mutation(
@@ -225,6 +226,36 @@ MUTATIONS: tuple[Mutation, ...] = (
         "        accepted.append(handle)",
         "        rejected[raw] = 'disabled'",
         IDENTITY,
+    ),
+    # --- pre-launch review: the compound data-loss defect --------------------
+    Mutation(
+        "phone shape blocks a window without checking it IS a phone",
+        "        if looks_like_phone(match.group()):",
+        "        if len(_digits(match.group())) >= 9:",
+    ),
+    Mutation(
+        "source URLs are depersonalised along with prose",
+        "            parts.append(match.group())",
+        "            parts.append(_scrub(match.group()))",
+        RENDER,
+    ),
+    Mutation(
+        "depersonalised titles collide on one filename again",
+        "    if MEMBER in title:",
+        "    if False:",
+        RENDER,
+    ),
+    Mutation(
+        "every model gets the dynamic-filtering search tool",
+        "    return WEB_SEARCH_TOOL if model in DYNAMIC_FILTER_MODELS else WEB_SEARCH_TOOL_BASIC",
+        "    return WEB_SEARCH_TOOL",
+        CLIENT,
+    ),
+    Mutation(
+        "effort sent to every model including Haiku",
+        "    if model in EFFORT_MODELS:",
+        "    if True:",
+        CLIENT,
     ),
 )
 

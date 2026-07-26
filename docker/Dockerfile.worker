@@ -32,8 +32,13 @@ ENV SRB_CACHE_DIR=/cache \
 # read-only to `worker`: application code that the process running it can rewrite
 # turns any file-write bug into persistence, and nothing here needs to modify its
 # own source.
-RUN mkdir -p /cache && chown -R worker:worker /cache && chown -R root:root /app \
- && chmod -R go-w /app
+# /app/var is created and handed to the runtime user BEFORE /app is locked down.
+# It is a mount point for the host's ./var, and the receiver writes
+# observed-handles.json into it. Locking all of /app without carving this out
+# left the directory unwritable and silently disabled auto-handle learning.
+RUN mkdir -p /cache /app/var \
+ && chown -R root:root /app && chmod -R go-w /app \
+ && chown -R worker:worker /cache /app/var && chmod u+w /app/var
 VOLUME ["/cache"]
 
 USER worker

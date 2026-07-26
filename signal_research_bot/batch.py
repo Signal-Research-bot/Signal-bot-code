@@ -350,6 +350,18 @@ def main() -> int:
         # implies a bug; the message is the actionable part.
         print(f"refusing to run: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:  # noqa: BLE001
+        # An API error -- a mistyped key, a 429, a 400 from a parameter this
+        # model does not accept -- reached the operator as a raw traceback, on
+        # a scheduled job whose output nobody is watching. The most likely
+        # first-run failure deserves a sentence, not a stack.
+        name = type(exc).__name__
+        if name.startswith(("APIError", "BadRequest", "Authentication",
+                            "PermissionDenied", "RateLimit", "APIStatus",
+                            "APIConnection", "InternalServer")):
+            print(f"Anthropic API error ({name}): {exc}", file=sys.stderr)
+            return 3
+        raise
 
 
 if __name__ == "__main__":

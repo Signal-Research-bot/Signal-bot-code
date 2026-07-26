@@ -38,7 +38,7 @@ from .identity import Roster
 # The bare-digit-run rule and its validity check live in redact.py, where
 # libphonenumber is already a hard dependency. Importing them keeps one
 # definition of "is this a phone number" rather than two that can drift.
-from .redact import BARE_DIGIT_RUN_RE, is_dialable
+from .redact import BARE_DIGIT_RUN_RE, is_dialable, looks_like_phone
 
 # Characters that render as nothing -- or that reorder what is rendered --
 # but break a naive substring match. The bidi controls are here because they
@@ -204,13 +204,21 @@ def _assert_no_identity_shapes(text: str, sha: str) -> None:
         if pattern.search(text):
             raise EgressViolation(rule, f"text matching {rule} is present", sha)
 
-    # The separated-phone shape (digits, separator, digits, separator, digits)
-    # also describes an ISO date. "2026-07-14" carries 8 digits; the shortest
-    # international phone number carries 9. Requiring 9 keeps real numbers
-    # caught and stops the firewall blocking its own timestamp headers -- which
-    # it did, on every batch, until an end-to-end run surfaced it.
+    # The separated-phone shape also describes an ISO date, a SEC CIK and an
+    # EDGAR accession number. The digit-count floor of 9 handled the date; it
+    # did nothing for the filing identifiers, which are longer, not shorter.
+    #
+    # This was the most damaging defect found before launch. `0001193125-24-
+    # 206789` matched, so the firewall blocked the window -- and because a
+    # blocked window is CONSUMED rather than retried, one EDGAR link in a chat
+    # about company filings destroyed that entire batch of messages. Two
+    # separately reasonable decisions that combined into silent data loss.
+    #
+    # looks_like_phone() applies libphonenumber rather than a digit count, so an
+    # 18-digit accession number is rejected on length alone before anything else
+    # runs.
     for match in SEPARATED_PHONE_RE.finditer(text):
-        if len(_digits(match.group())) >= 9:
+        if looks_like_phone(match.group()):
             raise EgressViolation(
                 "separated-phone", "text matching separated-phone is present", sha
             )

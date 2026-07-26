@@ -92,9 +92,20 @@ services:
     networks: [internal]
     volumes:
       - cache:/cache
+      # The receiver needs var/ too, not just the cache. It writes
+      # observed-handles.json here -- the file that lets the deny-list learn
+      # what members are called without the operator knowing anyone's name.
+      #
+      # Without this mount the path resolved inside the image to /app/var,
+      # which is root-owned and go-w after the container hardening, so the
+      # write failed and the whole auto-handle feature was inert in the only
+      # configuration that actually ships. It failed silently, because
+      # _observe_handle logs and continues rather than crashing the receiver.
+      - ./var:/app/var
     environment:
       SRB_SIGNAL_HOST: signal-cli
       SRB_SIGNAL_PORT: "7583"
+      SRB_VAR_DIR: /app/var
       SRB_GROUP_ID: ${SRB_GROUP_ID:-}   # deliberately NOT ${VAR:?...}: it is
         # unknowable until after `--profile link`, and a required-var marker
         # here blocks the build you need in order to link. config.py validates

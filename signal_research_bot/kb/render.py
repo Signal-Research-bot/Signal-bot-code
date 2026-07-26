@@ -15,6 +15,7 @@ Pure functions: no filesystem, no clock, no network. The writer handles those.
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from typing import Any
 
 # Characters Obsidian and Windows will not accept in a filename.
@@ -29,13 +30,25 @@ _BARE_SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 # Speaker labels, as the transcript presents them to the model.
 _SPEAKER = re.compile(r"(?<!\w)Participants?\s+[A-Z]{1,3}(?!\w)")
 # "@handle" written by a member and copied through by the model.
-_AT_HANDLE = re.compile(r"(?<![\w@])@[A-Za-z0-9._-]{2,}")
+#
+# The lookbehind excludes "/" as well as word characters, and URLs are carved
+# out entirely below. Without both, this fired on the "/@user" segment of a
+# link: "https://x.com/@coinmetrics/status/1" became
+# "https://x.com/a group member/status/1". That corrupted evidence URLs -- the
+# whole point of the archive -- and the mangled URL then failed the grounding
+# check, so the citation was dropped as a fabrication too.
+_AT_HANDLE = re.compile(r"(?<![\w@/])@[A-Za-z0-9._-]{2,}")
+_URL = re.compile(r"https?://\S+", re.I)
 
 MEMBER = "a group member"
 
 # A topical slug: lowercase, hyphenated, no '@', no underscores, no digits-only.
 # Deliberately excludes the shapes handles usually take.
 _TAG_SAFE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
+
+
+def _scrub(text: str) -> str:
+    return _AT_HANDLE.sub(MEMBER, _SPEAKER.sub(MEMBER, text))
 
 
 def depersonalise(value: Any) -> Any:
@@ -65,8 +78,17 @@ def depersonalise(value: Any) -> Any:
     said plainly that a working tool matters more.
     """
     if isinstance(value, str):
-        out = _SPEAKER.sub(MEMBER, value)
-        return _AT_HANDLE.sub(MEMBER, out)
+        # URLs are carved out and passed through untouched. A source link is
+        # evidence, not prose, and rewriting any part of it both corrupts the
+        # citation and makes it fail the grounding check downstream.
+        parts = []
+        last = 0
+        for match in _URL.finditer(value):
+            parts.append(_scrub(value[last:match.start()]))
+            parts.append(match.group())
+            last = match.end()
+        parts.append(_scrub(value[last:]))
+        return "".join(parts)
     if isinstance(value, list):
         return [depersonalise(v) for v in value]
     if isinstance(value, dict):
@@ -184,7 +206,24 @@ def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
     # Collapsed once, here, so the frontmatter scalar, the H1 and the filename
     # all agree. A multi-line title otherwise produces a heading that silently
     # continues into body text.
-    title = _WS.sub(" ", str(record["title"])).strip() or "Untitled"
+    raw_title = _WS.sub(" ", str(record.get("title") or "")).strip()
+    title = raw_title or "Untitled"
+
+    # Depersonalisation collapses distinct titles onto one filename: "Research -
+    # Participant A on reserves" and "... Participant B on reserves" both become
+    # "Research - a group member on reserves". VaultWriter treats an existing
+    # path as idempotency and skips the write, so the second entry was silently
+    # discarded while the batch counted it as written and announced it to the
+    # group.
+    #
+    # A short digest of the question disambiguates, and only when something was
+    # actually stripped -- ordinary titles keep clean, readable filenames.
+    stem = slug(title)
+    if MEMBER in title:
+        digest = sha256(
+            str(record.get("question", "")).encode("utf-8")
+        ).hexdigest()[:6]
+        stem = slug(f"{title} ({digest})")
     parts = [
         frontmatter(
             record, title=title, first_raised=first_raised,
@@ -238,4 +277,4 @@ def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
         "Participants are pseudonymised; see PRIVACY.md in the source repository.",
         "",
     ]
-    return slug(title), "\n".join(parts)
+    return stem, "\n".join(parts)
