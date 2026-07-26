@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import json
 import sys
 import uuid
 from pathlib import Path
@@ -26,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from signal_research_bot.envelope import SELF  # noqa: E402
 from signal_research_bot.importer import (  # noqa: E402
     ImportError_,
+    inspect_jsonl,
     load_acis,
     normalise_group_id,
     parse,
@@ -240,3 +242,115 @@ def test_a_missing_column_fails_loudly_rather_than_importing_blanks(export):
 
 def test_thread_resolution_is_exact(export):
     assert resolve_thread_ids(export, GROUP_BYTES) == {"100"}
+
+
+# --- Signal's plaintext JSONL export (the current route) ----------------------
+#
+# Signal's newer backup-v2 format (a directory of `main`, `metadata`, `files`)
+# is encrypted and signalbackup-tools cannot read it -- upstream issue 382 is
+# open and estimated in months. Settings -> Chats -> Export chat History
+# produces this instead: metadata.json, main.jsonl, files/.
+#
+# The frame schema is undocumented, so the parser matches several spellings and
+# `--inspect` exists to surface a mismatch before an import rather than after.
+
+
+def _jsonl(path: Path, frames: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(f) for f in frames) + "\n", encoding="utf-8"
+    )
+
+
+@pytest.fixture
+def export_jsonl(tmp_path):
+    _jsonl(tmp_path / "main.jsonl", [
+        {"recipient": {"id": "1", "contact": {"aci": ALICE}}},
+        {"recipient": {"id": "2", "contact": {"aci": BOB}}},
+        {"recipient": {"id": "9", "group": {"masterKey": GROUP_B64}}},
+        {"recipient": {"id": "8", "group": {"masterKey": base64.b64encode(b"\xab" * 32).decode()}}},
+        {"recipient": {"id": "5", "self": {}}},
+        {"chat": {"id": "100", "recipientId": "9"}},      # target group
+        {"chat": {"id": "200", "recipientId": "8"}},      # another group
+        {"chatItem": {"chatId": "100", "authorId": "1", "dateSent": TS,
+                      "standardMessage": {"text": {"body": "is the attestation an audit?"}}}},
+        {"chatItem": {"chatId": "100", "authorId": "5", "dateSent": TS + 1000,
+                      "standardMessage": {"text": {"body": "my own reply"}}}},
+        {"chatItem": {"chatId": "200", "authorId": "2", "dateSent": TS + 2000,
+                      "standardMessage": {"text": {"body": "OTHER GROUP CONTENT"}}}},
+        {"chatItem": {"chatId": "100", "authorId": "1", "dateSent": TS + 3000,
+                      "updateMessage": {"groupChange": {}}}},   # no body
+    ])
+    return tmp_path
+
+
+def test_jsonl_export_is_detected_without_a_flag(export_jsonl):
+    messages, _ = parse(export_jsonl, GROUP_BYTES)
+    assert [m.body for m in messages][0] == "is the attestation an audit?"
+
+
+def test_jsonl_only_imports_the_target_group(export_jsonl):
+    messages, stats = parse(export_jsonl, GROUP_BYTES)
+    assert "OTHER GROUP CONTENT" not in [m.body for m in messages]
+    assert stats.other_group == 1
+
+
+def test_jsonl_group_filter_runs_before_any_other_field(export_jsonl):
+    """Same ordering guarantee as the CSV path, and the same reason: this file
+    holds every conversation on the account."""
+    _jsonl(export_jsonl / "main.jsonl", [
+        {"recipient": {"id": "9", "group": {"masterKey": GROUP_B64}}},
+        {"recipient": {"id": "1", "contact": {"aci": ALICE}}},
+        {"chat": {"id": "100", "recipientId": "9"}},
+        {"chat": {"id": "200", "recipientId": "8"}},
+        # Malformed in every field except chatId.
+        {"chatItem": {"chatId": "200", "authorId": None, "dateSent": "nope",
+                      "standardMessage": {"text": {"body": "PRIVATE"}}}},
+        {"chatItem": {"chatId": "100", "authorId": "1", "dateSent": TS,
+                      "standardMessage": {"text": {"body": "in scope"}}}},
+    ])
+    messages, stats = parse(export_jsonl, GROUP_BYTES)
+    assert [m.body for m in messages] == ["in scope"]
+    assert stats.other_group == 1
+
+
+def test_jsonl_keeps_acis_and_the_self_sentinel(export_jsonl):
+    messages, _ = parse(export_jsonl, GROUP_BYTES)
+    by_body = {m.body: m.source for m in messages}
+    assert by_body["is the attestation an audit?"] == ALICE
+    assert by_body["my own reply"] == SELF
+
+
+def test_jsonl_missing_group_fails_loudly(export_jsonl):
+    with pytest.raises(ImportError_, match="not found in main.jsonl"):
+        parse(export_jsonl, b"\xcd" * 32)
+
+
+def test_inspect_reports_shape_and_never_a_value(export_jsonl):
+    """The export is undocumented AND contains every conversation on the
+    account. Learning the field names must not require reading a body."""
+    report = inspect_jsonl(export_jsonl)
+    blob = json.dumps(report)
+
+    assert report["frame_counts"]["chatItem"] == 4
+    assert "authorId" in report["frame_keys"]["chatItem"]
+    for secret in ("OTHER GROUP CONTENT", "is the attestation an audit?", ALICE, BOB):
+        assert secret not in blob, f"inspect leaked a value: {secret[:20]}"
+
+
+def test_a_truncated_final_line_does_not_abort_the_import(export_jsonl):
+    """Exports get interrupted. One bad line must not cost the whole history."""
+    p = export_jsonl / "main.jsonl"
+    p.write_text(p.read_text(encoding="utf-8") + '{"chatItem": {"chatId": "100"', encoding="utf-8")
+    messages, _ = parse(export_jsonl, GROUP_BYTES)
+    assert messages
+
+
+def test_the_encrypted_backup_v2_directory_is_explained_not_just_rejected(tmp_path):
+    """If someone points this at the `main`/`metadata`/`files` directory, the
+    error has to say why it cannot work and what to do instead."""
+    for name in ("main", "metadata"):
+        (tmp_path / name).write_bytes(b"\x00\x01")
+    (tmp_path / "files").mkdir()
+    with pytest.raises(ImportError_, match="backup-v2"):
+        parse(tmp_path, GROUP_BYTES)

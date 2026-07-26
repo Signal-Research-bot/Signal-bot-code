@@ -225,6 +225,18 @@ MUTATIONS: tuple[Mutation, ...] = (
         IDENTITY,
     ),
     Mutation(
+        "jsonl import reads items from every conversation on the account",
+        '        if str(_first(item, ("chatId",), ("chat_id",)) or "") not in chats_in_group:',
+        "        if False:",
+        IMPORTER,
+    ),
+    Mutation(
+        "inspect leaks values instead of key names",
+        "                shapes.setdefault(kind, set()).update(payload.keys())",
+        "                shapes.setdefault(kind, set()).update(str(v) for v in payload.values())",
+        IMPORTER,
+    ),
+    Mutation(
         "import reads rows from every conversation on the account",
         '        if row.get(thread_col) not in threads:',
         '        if False:',

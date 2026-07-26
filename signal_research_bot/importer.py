@@ -1,20 +1,44 @@
-"""Backfill the cache from a Signal Android backup.
+"""Backfill the cache from a Signal history export.
 
 signal-cli never backfills: it receives from the moment it is linked and no
 earlier. Anything said before that exists only on the phones. This module is the
 one supported way to get it in.
 
-    Signal (Android) -> Settings -> Chats -> Backups -> Turn on
-    (save the 30-digit passphrase; without it the file is unreadable, forever)
+TWO INPUT FORMATS, AND THE FIRST ONE IS THE ONE YOU WANT
+--------------------------------------------------------
+**JSONL (Signal's own plaintext export).** The current route.
+
+    Signal (Android) -> Settings -> Chats -> Export chat History
+
+produces a ZIP holding `metadata.json`, `main.jsonl` and `files/`. Unzip it and
+point `--csv-dir` at the directory. No passphrase, no third-party tool, and the
+frames carry ACIs.
+
+    python -m signal_research_bot.importer --csv-dir <dir> --inspect
+    python -m signal_research_bot.importer --csv-dir <dir> --dry-run
+
+Run `--inspect` FIRST. Signal does not document the frame schema, and this
+module infers it from field names. `--inspect` reports the structure -- key
+names and counts, never a value -- so a mismatch is visible before anything is
+imported rather than showing up as a silently empty window.
+
+That export is **not encrypted at rest**, unlike the backup files. Treat it
+accordingly and delete it when the import is verified.
+
+**CSV (legacy `.backup` files only).** Retained for older backups:
 
     signalbackup-tools <file.backup> <passphrase> --exportcsv \\
         message=message.csv,recipient=recipient.csv,groups=groups.csv,thread=thread.csv
 
-    python -m signal_research_bot.importer --csv-dir <dir> --dry-run
+This does NOT work on Signal's newer backup-v2 format -- the directory holding
+`main`, `metadata` and `files`. signalbackup-tools cannot read that format yet.
+Use the JSONL route above instead.
 
-WHY CSV AND NOT THE RENDERED EXPORT
------------------------------------
-signalbackup-tools can also emit HTML or plain text, and `sigexport` produces
+The format is detected from what is in the directory; there is no flag.
+
+WHY NOT A RENDERED EXPORT
+-------------------------
+signalbackup-tools can emit HTML or plain text, and `sigexport` produces
 Markdown from Signal Desktop. Both were rejected for the same reason: they carry
 DISPLAY NAMES, not ACIs.
 
@@ -44,6 +68,7 @@ import argparse
 import base64
 import binascii
 import csv
+import json
 import logging
 import re
 import sys
@@ -187,8 +212,174 @@ def load_acis(csv_dir: Path) -> dict[str, str]:
     return out
 
 
+def _dig(obj: Any, *path: str) -> Any:
+    """Walk a nested dict by key path, returning None rather than raising."""
+    for key in path:
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(key)
+    return obj
+
+
+def _first(obj: Any, *paths: tuple[str, ...]) -> Any:
+    for path in paths:
+        got = _dig(obj, *path)
+        if got not in (None, ""):
+            return got
+    return None
+
+
+def _frames(path: Path) -> Iterator[dict[str, Any]]:
+    if not path.exists():
+        raise ImportError_(f"{path.name} not found")
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue          # a truncated final line is not worth failing over
+            if isinstance(obj, dict):
+                yield obj
+
+
+def inspect_jsonl(csv_dir: Path, limit: int = 40) -> dict[str, Any]:
+    """Report the SHAPE of main.jsonl: key names and counts, never a value.
+
+    Signal does not document the frame schema, so the field names below are
+    inferred. This makes a mismatch visible before an import rather than after
+    -- and it deliberately reports structure only, because the file contains
+    every conversation on the account and there is no reason to read a body in
+    order to learn what the columns are called.
+    """
+    kinds: dict[str, int] = {}
+    shapes: dict[str, set[str]] = {}
+    for frame in _frames(csv_dir / "main.jsonl"):
+        for kind, payload in frame.items():
+            kinds[kind] = kinds.get(kind, 0) + 1
+            if isinstance(payload, dict) and len(shapes.get(kind, ())) < limit:
+                shapes.setdefault(kind, set()).update(payload.keys())
+    return {"frame_counts": kinds, "frame_keys": {k: sorted(v) for k, v in shapes.items()}}
+
+
+def parse_jsonl(
+    csv_dir: Path, target: bytes, *, since_ms: int = 0
+) -> tuple[list[ParsedMessage], ImportStats]:
+    """Read Signal's plaintext JSONL export.
+
+    The file is a stream of frames. The ones that matter:
+
+      recipient  -> id, and an ACI for a person (a group frame carries groupId)
+      chat       -> id, recipientId          (which conversation)
+      chatItem   -> chatId, authorId, dateSent, and the message itself
+
+    Field names are inferred and matched case-tolerantly against several
+    spellings, because the schema is undocumented and has already changed once.
+    `--inspect` is how a mismatch is caught.
+    """
+    stats = ImportStats()
+    acis: dict[str, str] = {}
+    group_recipients: set[str] = set()
+    chats_in_group: set[str] = set()
+    self_ids: set[str] = set()
+
+    # Pass one: identity and structure only. No message field is touched.
+    for frame in _frames(csv_dir / "main.jsonl"):
+        rec = _first(frame, ("recipient",))
+        if isinstance(rec, dict):
+            rid = str(_first(rec, ("id",)) or "")
+            if not rid:
+                continue
+            gid = _first(rec, ("group", "masterKey"), ("group", "groupId"), ("groupId",))
+            if gid and normalise_group_id(str(gid)) == target:
+                group_recipients.add(rid)
+            aci = _first(rec, ("contact", "aci"), ("aci",), ("contact", "serviceId"))
+            if aci:
+                acis[rid] = str(aci).lower()
+            if _first(rec, ("self",)) is not None:
+                self_ids.add(rid)
+            continue
+
+        chat = _first(frame, ("chat",))
+        if isinstance(chat, dict):
+            cid = str(_first(chat, ("id",)) or "")
+            crid = str(_first(chat, ("recipientId",), ("recipient_id",)) or "")
+            if cid and crid in group_recipients:
+                chats_in_group.add(cid)
+
+    if not group_recipients:
+        raise ImportError_(
+            "the target group was not found in main.jsonl. Run --inspect and "
+            "check SRB_GROUP_ID matches the group this export came from."
+        )
+
+    out: list[ParsedMessage] = []
+    for frame in _frames(csv_dir / "main.jsonl"):
+        item = _first(frame, ("chatItem",), ("chat_item",))
+        if not isinstance(item, dict):
+            continue
+        stats.rows_read += 1
+
+        # FIRST. Nothing else is read from an item belonging to another chat.
+        if str(_first(item, ("chatId",), ("chat_id",)) or "") not in chats_in_group:
+            stats.other_group += 1
+            continue
+
+        body = _first(
+            item,
+            ("standardMessage", "text", "body"),
+            ("standardMessage", "body"),
+            ("text", "body"),
+        )
+        body = (str(body).strip() if body else "")
+        if not body:
+            # Group updates, calls, reactions, attachment-only items.
+            stats.no_body += 1
+            continue
+
+        try:
+            ts = int(_first(item, ("dateSent",), ("date_sent",), ("sentTimestamp",)) or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        if ts <= 0 or ts < since_ms:
+            continue
+
+        author = str(_first(item, ("authorId",), ("author_id",)) or "")
+        if _first(item, ("outgoing",)) is not None or author in self_ids:
+            source = SELF
+        else:
+            source = acis.get(author, "")
+            if not source:
+                stats.unknown_sender += 1
+                continue
+
+        out.append(
+            ParsedMessage(
+                kind=Kind.MESSAGE, group_id="", source=source,
+                timestamp_ms=coarsen(ts), body=body, raw_timestamp_ms=ts,
+            )
+        )
+    return out, stats
+
+
 def parse(csv_dir: Path, target: bytes, *, since_ms: int = 0) -> tuple[list[ParsedMessage], ImportStats]:
-    """Read the export into ParsedMessages. Group filter first, always."""
+    """Dispatch on what is actually in the directory."""
+    if (csv_dir / "main.jsonl").exists():
+        return parse_jsonl(csv_dir, target, since_ms=since_ms)
+    if (csv_dir / "message.csv").exists():
+        return parse_csv(csv_dir, target, since_ms=since_ms)
+    raise ImportError_(
+        f"{csv_dir} holds neither main.jsonl (Signal's 'Export chat History') "
+        f"nor message.csv (signalbackup-tools --exportcsv). If it holds 'main', "
+        f"'metadata' and 'files', that is the encrypted backup-v2 format, which "
+        f"no available tool can read yet -- use Export chat History instead."
+    )
+
+
+def parse_csv(csv_dir: Path, target: bytes, *, since_ms: int = 0) -> tuple[list[ParsedMessage], ImportStats]:
+    """Read a signalbackup-tools CSV dump. Group filter first, always."""
     stats = ImportStats()
     threads = resolve_thread_ids(csv_dir, target)
     acis = load_acis(csv_dir)
@@ -305,6 +496,10 @@ def main() -> int:
                     help="only import messages on or after this date (YYYY-MM-DD)")
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would be imported, write nothing")
+    ap.add_argument("--inspect", action="store_true",
+                    help="report the SHAPE of main.jsonl (key names and counts, "
+                         "never a value) and exit. Run this first: the frame "
+                         "schema is undocumented and inferred.")
     args = ap.parse_args()
 
     since_ms = 0
@@ -325,6 +520,10 @@ def main() -> int:
 
     configure(cfg.log_level)
     try:
+        if args.inspect:
+            import json as _json  # noqa: PLC0415
+            print(_json.dumps(inspect_jsonl(args.csv_dir), indent=2))
+            return 0
         return run(cfg, args.csv_dir, since_ms=since_ms, dry_run=args.dry_run)
     except (ImportError_, CacheEncryptionUnavailable) as exc:
         print(f"import failed: {exc}", file=sys.stderr)
