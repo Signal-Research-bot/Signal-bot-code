@@ -1,0 +1,72 @@
+/* == AI Graph Highlighter ============================================== */
+
+/* Edge tooltip shown when hovering a highlighted connection in the graph.
+   --aigh-accent is set inline by the plugin from the configured accent color. */
+.aigh-edge-tooltip {
+	position: absolute;
+	z-index: var(--layer-tooltip, 70);
+	pointer-events: none;
+	display: none;
+	max-width: 340px;
+	padding: 8px 12px;
+	background: var(--background-primary);
+	color: var(--text-normal);
+	border: 1px solid var(--background-modifier-border);
+	border-left: 3px solid var(--aigh-accent, #00e5ff);
+	border-radius: 8px;
+	box-shadow: var(--shadow-s);
+	font-size: var(--font-ui-small);
+	line-height: 1.35;
+}
+
+.aigh-edge-tooltip.aigh-visible {
+	display: block;
+}
+
+.aigh-tt-label {
+	font-weight: 600;
+	margin-bottom: 2px;
+	overflow-wrap: anywhere;
+}
+
+.aigh-tt-route {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	overflow-wrap: anywhere;
+}
+
+.aigh-tt-strength {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	margin-top: 4px;
+}
+
+/* Strength meter inside the tooltip */
+.aigh-tt-bar {
+	height: 4px;
+	margin-top: 4px;
+	border-radius: 2px;
+	background: var(--background-modifier-border);
+	overflow: hidden;
+}
+
+.aigh-tt-bar-fill {
+	height: 100%;
+	border-radius: 2px;
+	background: var(--aigh-accent, #00e5ff);
+}
+
+/* Settings tab: swatch preview next to the color picker */
+.aigh-settings-preview {
+	display: inline-block;
+	width: 60px;
+	height: 12px;
+	border-radius: 6px;
+	margin-left: 8px;
+	vertical-align: middle;
+	background: linear-gradient(
+		to right,
+		color-mix(in srgb, var(--aigh-accent, #00e5ff) 20%, transparent),
+		var(--aigh-accent, #00e5ff)
+	);
+}

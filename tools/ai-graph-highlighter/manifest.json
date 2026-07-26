@@ -1,0 +1,9 @@
+{
+	"id": "ai-graph-highlighter",
+	"name": "AI Graph Highlighter",
+	"version": "1.0.0",
+	"minAppVersion": "1.5.0",
+	"description": "Lets an AI assistant analyze connections between notes and visualize them in the Graph View with strength-graded highlighting. Nodes glow in an accent color; edges fade from pale (weak) to vivid (strong) based on a 0\u20131 strength metric.",
+	"author": "Community",
+	"isDesktopOnly": false
+}

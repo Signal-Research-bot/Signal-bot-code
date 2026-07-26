@@ -76,6 +76,14 @@ the vault's own README.
 Neither may be weakened to make a test pass. If you are contributing and a
 check blocks you, the check is probably right.
 
+## Also in this repository
+
+[`tools/ai-graph-highlighter/`](tools/ai-graph-highlighter/) is a standalone
+Obsidian plugin, unrelated to the bot. It is published from here for
+convenience and is **not** covered by anything above: no network calls, no
+Signal data, not exercised by the test suite, and outside the scope of
+PRIVACY.md. Its own README says so at the top.
+
 ## Auditing this without reading all of it
 
 | Question | Where to look |
