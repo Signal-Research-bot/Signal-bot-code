@@ -19,6 +19,14 @@ name: signal-research-bot
 # equivalent to the Signal account itself. Only the worker needs it, and the
 # compose network is enough for that.
 networks:
+  # NOT `internal: true`, despite the name. Both services need outbound
+  # internet: signal-cli talks to Signal's servers and the worker talks to the
+  # Anthropic API, so an isolated network would break the system outright.
+  #
+  # What the name means here is that no port is published to the host, so
+  # nothing outside Docker can reach the JSON-RPC socket. An audit flagged the
+  # name as implying a containment property it does not have; the property it
+  # does have is stated above rather than assumed from the word.
   internal:
     driver: bridge
 
@@ -46,11 +54,21 @@ services:
       - signal-data:/data
     logging: *logging
     healthcheck:
-      # The daemon is healthy when the JSON-RPC port accepts a connection.
-      # Deliberately does not send a request: with on-connection receive mode,
-      # connecting is subscribing, and a probe that connects and drops would
-      # churn the Signal fetch loop.
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/7583' || exit 1"]
+      # Checks that the port is LISTENING, without connecting to it.
+      #
+      # The previous version opened a TCP connection and dropped it, with a
+      # comment explaining why that would be harmful -- it did the exact thing
+      # it warned against. Under --receive-mode=on-connection the connection IS
+      # the subscription: signal-cli starts its fetch loop when a client
+      # connects and stops when the last one disconnects. A probe that connects
+      # and drops every 60s churns that loop, and in the window where the worker
+      # is down it is *worse* than no probe at all, because it makes signal-cli
+      # fetch (and acknowledge) messages with nothing on the other end to
+      # persist them. That is silent, permanent message loss.
+      #
+      # /proc/net/tcp is read-only and needs no extra package. 0x1D9F == 7583,
+      # state 0A == TCP_LISTEN.
+      test: ["CMD-SHELL", "grep -qi ':1D9F .* 0A ' /proc/net/tcp || exit 1"]
       interval: 60s
       timeout: 5s
       retries: 3

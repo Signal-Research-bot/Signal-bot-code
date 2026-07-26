@@ -14,6 +14,7 @@ import sys
 
 from .cache import Cache
 from .config import Config, ConfigError
+from .identity import Roster
 from .logging_setup import configure
 from .receiver import Receiver
 
@@ -30,7 +31,23 @@ def main() -> int:
     configure(cfg.log_level)
 
     cache = Cache.open(cfg.cache_path, cfg.cache_key)
-    receiver = Receiver(cfg.signal_host, cfg.signal_port, cfg.group_id, cache)
+
+    # Loaded so an opt-out is honoured at ingest, as PRIVACY.md says it is.
+    # A missing roster is NOT fatal here: the receiver's job is to lose no
+    # messages, and refusing to start would do more harm than running with the
+    # opt-out enforced one stage later, where transcript.Builder also applies
+    # it. The batch job does refuse to run without a roster, which is where
+    # redaction actually needs it.
+    try:
+        roster = Roster.load(cfg.roster_path)
+    except FileNotFoundError:
+        roster = None
+        log.warning(
+            "no roster; opt-out will be applied at transcript build instead of ingest",
+            extra={"path": cfg.roster_path.name},
+        )
+
+    receiver = Receiver(cfg.signal_host, cfg.signal_port, cfg.group_id, cache, roster)
 
     def shutdown(signum, _frame):
         # Stop after the current frame so a message in flight is written first.

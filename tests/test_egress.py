@@ -315,3 +315,58 @@ def test_a_separated_phone_is_still_caught(policy):
 def test_a_separated_phone_with_spaces_is_caught(policy):
     spaced = "212" + " " + "555" + " " + "0198"
     assert blocked(body(f"Participant A: call {spaced}"), policy) == "separated-phone"
+
+
+# --- audit regressions --------------------------------------------------------
+
+
+def test_a_phone_number_without_a_plus_is_blocked(policy):
+    """E164_RE requires the '+' and SEPARATED_PHONE_RE requires a separator, so
+    a bare run of digits matched neither. The firewall is the backstop for a
+    redaction miss, so this had to hold here too, not only in redact.py."""
+    with pytest.raises(EgressViolation):
+        check_outbound(
+            {"messages": [{"role": "user", "content": "ring " + "44" + "2079250918"}]},
+            policy,
+        )
+
+
+def test_a_reserves_figure_is_not_blocked(policy):
+    """The firewall failing closed on every balance-sheet number would wedge
+    every window that discussed one."""
+    for figure in ("127000000000", "3200000000", "2024-03-31", "830000"):
+        check_outbound(
+            {"messages": [{"role": "user", "content": f"reserves {figure}"}]}, policy
+        )
+
+
+def test_non_ascii_digits_do_not_slip_past_the_firewall(policy):
+    arabic = "".join(chr(0x0660 + int(d)) for d in "442079250918")
+    with pytest.raises(EgressViolation):
+        check_outbound({"messages": [{"role": "user", "content": arabic}]}, policy)
+
+
+def test_a_bidi_control_does_not_hide_a_roster_name(policy):
+    with pytest.raises(EgressViolation):
+        check_outbound(
+            {"messages": [{"role": "user", "content": "An" + "‮" + "na Smith said so"}]},
+            policy,
+        )
+
+
+def test_a_roster_phone_in_arabic_digits_is_still_recognised():
+    """The roster-phone check strips to ASCII digits and does a substring
+    match, so an unfolded Arabic-Indic number reduces to the empty string and
+    the check goes blind. Folding is what keeps it seeing.
+
+    The bare-phone rule alone does not cover this: libphonenumber normalises
+    Unicode digits internally, so that rule catches the number either way. This
+    test pins the layer that does not.
+    """
+    number = "+" + "44" + "2079250918"
+    roster = Roster(names=("Anna Smith",), phones=(number,), group_name="Ravenhill")
+    pol = Policy.build(roster, {"Participant A"}, GROUP_ID)
+    arabic = "".join(chr(0x0660 + int(d)) for d in number.lstrip("+"))
+    with pytest.raises(EgressViolation) as caught:
+        check_outbound({"messages": [{"role": "user", "content": arabic}]}, pol)
+    assert caught.value.rule == "roster-phone"

@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from signal_research_bot.cache import Cache  # noqa: E402
+from signal_research_bot.identity import Roster  # noqa: E402
 from signal_research_bot.receiver import (  # noqa: E402
     BOT_MARKER,
     Receiver,
@@ -29,12 +30,14 @@ from signal_research_bot.receiver import (  # noqa: E402
 
 GROUP = "Zm9vYmFyZ3JvdXBpZA=="
 ALICE = str(uuid.UUID(int=0xA11CE))
+BOB = str(uuid.UUID(int=0xB0B))
 TS = 1_784_000_000_000
 
 
-def notification(body: str = "hello", ts: int = TS, sync: bool = False) -> dict:
+def notification(body: str = "hello", ts: int = TS, sync: bool = False,
+                 source: str = ALICE) -> dict:
     payload = {"groupInfo": {"groupId": GROUP}, "message": body}
-    env = {"sourceUuid": ALICE, "timestamp": ts}
+    env = {"sourceUuid": source, "timestamp": ts}
     env["syncMessage"] = {"sentMessage": payload} if sync else None
     if sync:
         env.pop("dataMessage", None)
@@ -250,3 +253,61 @@ def test_send_frame_carries_the_bot_marker():
     assert frame["method"] == "send"
     assert BOT_MARKER in frame["params"]["message"]
     assert frame["params"]["groupId"] == GROUP
+
+
+def test_an_opted_out_member_is_never_written_to_the_cache(tmp_path):
+    """PRIVACY.md says an opt-out drops your messages "at the point of
+    collection". It was enforced only at transcript-build time, so the messages
+    were in fact collected, decrypted-at-rest on the operator's disk, and merely
+    filtered later. The sentence is the promise; this makes it literal."""
+    cache = Cache.open(tmp_path / "c.db", None, allow_plaintext=True)
+    roster = Roster(names=("Anna Smith",), phones=(), opted_out=frozenset({ALICE}))
+    r = Receiver("h", 1, GROUP, cache, roster)
+
+    r._handle(notification("something they said", source=ALICE))
+    assert r.stats.dropped_opted_out == 1
+    assert cache.pending() == []
+
+    r._handle(notification("something else", ts=TS + 60_000, source=BOB))
+    assert len(cache.pending()) == 1
+    cache.close()
+
+
+def test_without_a_roster_the_receiver_still_collects(tmp_path):
+    """A missing roster must not stop collection -- losing messages is the one
+    failure this component exists to prevent."""
+    cache = Cache.open(tmp_path / "c.db", None, allow_plaintext=True)
+    r = Receiver("h", 1, GROUP, cache, None)
+    r._handle(notification("hello", source=ALICE))
+    assert len(cache.pending()) == 1
+    cache.close()
+
+
+def test_one_poison_frame_does_not_kill_the_receiver(tmp_path):
+    """run_forever caught only OSError and socket.timeout, so anything raised
+    while HANDLING a message escaped and killed the process. The message was
+    never acknowledged to Signal, so the restart redelivered it and the process
+    died again -- one crafted message could stop all collection indefinitely."""
+    cache = Cache.open(tmp_path / "c.db", None, allow_plaintext=True)
+    r = Receiver("h", 1, GROUP, cache)
+    calls = {"n": 0}
+
+    def exploding(_frame):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("crafted envelope")
+        r._handle(_frame)
+
+    good = json.dumps(notification("survived", ts=TS + 60_000)).encode()
+    bad = json.dumps(notification("poison")).encode()
+    daemon = FakeDaemon([bad + b"\n" + good + b"\n"])
+    try:
+        r.host, r.port = "127.0.0.1", daemon.port
+        r.run_once(on_frame=exploding)
+    finally:
+        daemon.close()
+
+    assert r.stats.errors == 1
+    assert calls["n"] == 2, "the loop stopped at the poison frame"
+    assert len(cache.pending()) == 1, "the message after the poison one was lost"
+    cache.close()

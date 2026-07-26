@@ -24,6 +24,7 @@ from signal_research_bot import batch as batch_mod  # noqa: E402
 from signal_research_bot.cache import Cache  # noqa: E402
 from signal_research_bot.claude.client import Refusal, Usage  # noqa: E402
 from signal_research_bot.config import Config  # noqa: E402
+from signal_research_bot.egress import EgressViolation  # noqa: E402
 from signal_research_bot.envelope import Kind, ParsedMessage  # noqa: E402
 
 ALICE = str(uuid.UUID(int=0xA11CE))
@@ -181,11 +182,19 @@ def record(urls=("https://a.example",)):
 def test_resolved_task_skips_the_expensive_model(env, monkeypatch):
     client = FakeClient({"extract": extracted(), "triage": triaged(),
                          "cheap": cheap(urls=("https://a.example", "https://b.example")),
-                         "format": record()})
+                         "format": record()},
+                        search_results={"cheap": {"https://a.example"}})
     install(monkeypatch, client)
     assert batch_mod.run(cfg_for(env)) == 0
     assert "deep" not in client.calls, "Opus was called despite a confident cheap answer"
-    assert list((env / "vault" / "Research Log").glob("*.md"))
+    written = next((env / "vault" / "Research Log").glob("*.md")).read_text(encoding="utf-8")
+    # Asserting only that the file EXISTS is what this test used to do, and it
+    # passed for the wrong reason: with no search_results the allowlist was
+    # empty, every citation was stripped as ungrounded, and the page written was
+    # a sourceless entry carrying the renderer's "_No sources were retrieved_"
+    # line. The happy path has to prove a *grounded* write or it proves nothing.
+    assert "a.example" in written
+    assert "_No sources were retrieved" not in written
 
 
 def test_unresolved_task_escalates(env, monkeypatch):
@@ -296,7 +305,8 @@ def test_messages_are_marked_processed_and_not_reprocessed(env, monkeypatch):
 def test_metrics_are_written_and_carry_no_content(env, monkeypatch):
     client = FakeClient({"extract": extracted(), "triage": triaged(),
                          "cheap": cheap(urls=("https://a.example", "https://b.example")),
-                         "format": record()})
+                         "format": record()},
+                        search_results={"cheap": {"https://a.example"}})
     install(monkeypatch, client)
     batch_mod.run(cfg_for(env))
     line = (env / "metrics.jsonl").read_text(encoding="utf-8").strip()
@@ -358,8 +368,11 @@ def test_a_url_the_model_invented_is_rejected(env, monkeypatch):
     )
     install(monkeypatch, client)
     batch_mod.run(cfg_for(env))
-    written = next((env / "vault" / "Research Log").glob("*.md")).read_text(encoding="utf-8")
-    assert "invented.example" not in written
+    # EVERY citation was invented, so stripping them leaves no evidence at all.
+    # The entry is not written: notify.py tells the group that every answer
+    # carries its sources, and a page whose evidence table says "_No sources
+    # were retrieved_" reads like a finding rather than a failed lookup.
+    assert not list((env / "vault" / "Research Log").glob("*.md"))
 
 
 def test_a_url_the_search_returned_is_kept(env, monkeypatch):
@@ -389,3 +402,99 @@ def test_escalated_tasks_keep_their_own_citations(env, monkeypatch):
     batch_mod.run(cfg_for(env))
     written = next((env / "vault" / "Research Log").glob("*.md")).read_text(encoding="utf-8")
     assert "found-by-opus.example" in written, "the deep stage's own sources were stripped"
+
+
+# --- audit regressions --------------------------------------------------------
+
+
+def test_a_firewall_block_on_stage_one_does_not_wedge_every_future_window(
+    env, monkeypatch
+):
+    """The stage-1 and stage-2 calls carried the whole window and sat outside
+    any try/except, and main() did not catch EgressViolation either.
+
+    The failure was not the crash. It was that messages stay pending on a crash
+    by design, so the next run rebuilt the identical payload, and the firewall
+    rejected it identically -- forever. One redaction miss would have stopped
+    the bot permanently and silently, with every later message queued behind it.
+    """
+    class Blocking(FakeClient):
+        def send_json(self, **request):
+            raise EgressViolation("roster-name", "planted", "abc123")
+
+    install(monkeypatch, Blocking({}))
+    cfg = cfg_for(env)
+    assert batch_mod.run(cfg) == 1
+
+    metrics = (env / "metrics.jsonl").read_text(encoding="utf-8").strip().split("\n")
+    assert '"window_blocked": "roster-name"' in metrics[0]
+
+    # The window must be CONSUMED, not left pending. A second run must have
+    # nothing to do rather than replay the same rejected payload.
+    ok = FakeClient({"extract": {"tasks": []}})
+    install(monkeypatch, ok)
+    assert batch_mod.run(cfg_for(env)) == 0
+    assert "extract" not in ok.calls, "the blocked window was replayed"
+
+
+def test_a_refusal_before_triage_leaves_the_window_pending(env, monkeypatch):
+    """The counterweight to the test above. A refusal is transient in a way a
+    firewall block is not, so those messages must NOT be thrown away."""
+    class Refusing(FakeClient):
+        def send_json(self, **request):
+            raise Refusal("cyber", "no")
+
+    install(monkeypatch, Refusing({}))
+    assert batch_mod.run(cfg_for(env)) == 1
+
+    replayed = FakeClient({"extract": {"tasks": []}})
+    install(monkeypatch, replayed)
+    assert batch_mod.run(cfg_for(env)) == 0
+    assert "extract" in replayed.calls, "a transient failure discarded the window"
+
+
+def test_an_entry_with_no_grounded_sources_is_not_written(env, monkeypatch):
+    """notify.py tells the group every answer carries its sources. When every
+    citation is stripped as ungrounded the renderer has a dedicated string for
+    the empty case, which reads like a finding rather than a failed lookup."""
+    client = FakeClient(
+        {"extract": extracted(), "triage": triaged(),
+         "cheap": cheap(urls=("https://invented.example",)),
+         "format": record(urls=("https://invented.example",))},
+        search_results={"cheap": {"https://real.example"}},
+    )
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env))
+    assert not list((env / "vault" / "Research Log").glob("*.md"))
+    line = (env / "metrics.jsonl").read_text(encoding="utf-8")
+    assert '"unsourced_dropped": 1' in line
+    assert '"written": 0' in line
+
+
+def test_a_deferred_task_is_recorded_not_just_counted(env, monkeypatch):
+    """The window is marked processed at the end of the run, so a task deferred
+    by the cap was never seen again -- the only trace a question ever existed
+    was an integer in a log line."""
+    client = FakeClient(
+        {"extract": extracted(n=3), "triage": triaged(n=3),
+         "cheap": cheap(), "format": record()},
+        search_results={"cheap": {"https://a.example"}},
+    )
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env, max_tasks_per_window=1))
+    line = (env / "metrics.jsonl").read_text(encoding="utf-8")
+    assert '"deferred_over_cap": 2' in line
+    assert '"deferred_questions"' in line
+    assert "q1" in line and "q2" in line
+
+
+def test_a_failed_task_leaves_its_question_behind(env, monkeypatch):
+    client = FakeClient(
+        {"extract": extracted(), "triage": triaged(), "cheap": cheap(),
+         "format": ValueError("bad json")},
+        search_results={"cheap": {"https://a.example"}},
+    )
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env))
+    line = (env / "metrics.jsonl").read_text(encoding="utf-8")
+    assert '"unfinished_questions": ["q0"]' in line

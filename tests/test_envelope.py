@@ -211,3 +211,75 @@ def test_attachment_filenames_are_not_retained():
     )
     assert msg.attachment_count == 1
     assert "alice" not in repr(msg).lower()
+
+
+# --- audit regressions --------------------------------------------------------
+
+
+def test_an_edit_from_another_member_is_parsed():
+    """signal-cli delivers another member's edit as an envelope-level
+    editMessage wrapping its own dataMessage. _payload() checked only
+    dataMessage and syncMessage, returned None first, and so every edit anyone
+    else made was dropped -- leaving the un-edited original as the archived
+    version, silently."""
+    env = {
+        "sourceUuid": ALICE,
+        "timestamp": TS,
+        "editMessage": {
+            "targetSentTimestamp": TS - 9000,
+            "dataMessage": {"groupInfo": {"groupId": GROUP}, "message": "corrected"},
+        },
+    }
+    parsed = parse(env, GROUP)
+    assert parsed is not None, "the edit was dropped entirely"
+    assert parsed.kind is Kind.EDIT
+    assert parsed.body == "corrected"
+    assert parsed.source == ALICE
+    assert parsed.target_timestamp_ms == TS - 9000
+
+
+def test_the_operators_own_edit_is_parsed():
+    env = {
+        "timestamp": TS,
+        "syncMessage": {
+            "sentMessage": {
+                "editMessage": {
+                    "targetSentTimestamp": TS - 9000,
+                    "dataMessage": {
+                        "groupInfo": {"groupId": GROUP}, "message": "fixed typo"
+                    },
+                }
+            }
+        },
+    }
+    parsed = parse(env, GROUP)
+    assert parsed is not None and parsed.kind is Kind.EDIT
+    assert parsed.body == "fixed typo"
+    assert parsed.source == SELF
+
+
+def test_a_mention_offset_inside_a_surrogate_pair_does_not_crash():
+    """Offsets arrive over the network. A start that lands between the halves
+    of an emoji leaves a lone surrogate, and .decode() raises UnicodeDecodeError
+    -- which in the receive loop stalls the pipeline forever, because the
+    message is redelivered on every poll."""
+    body = "hi \U0001f600 @x"          # the emoji is one surrogate PAIR in UTF-16
+    out = substitute_mentions(body, (Mention(4, 1, BOB),), lambda m: "Participant B")
+    assert out == body, "an unapplicable mention must be left as raw text"
+
+
+def test_a_negative_mention_length_does_not_duplicate_the_body():
+    """hi < lo makes buf[:lo] + label + buf[hi:] duplicate the bytes between
+    them instead of replacing anything."""
+    body = "hi \U0001f600 @x"
+    out = substitute_mentions(body, (Mention(3, -1, BOB),), lambda m: "Participant B")
+    assert out == body
+
+
+def test_overlapping_mentions_do_not_corrupt_each_other():
+    body = "aaaaaaaa"
+    out = substitute_mentions(
+        body, (Mention(0, 5, BOB), Mention(3, 5, BOB)), lambda m: "X"
+    )
+    assert out.count("X") == 1, "an overlapping span was applied on top of a label"
+    assert "�" not in out

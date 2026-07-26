@@ -39,6 +39,7 @@ from typing import Any, Callable, Iterator
 
 from .cache import Cache
 from .envelope import DisappearingMessage, ParsedMessage, parse
+from .identity import Roster, is_opted_out
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +71,9 @@ class ReceiverStats:
     duplicates: int = 0
     dropped_expiring: int = 0
     dropped_bot_echo: int = 0
+    dropped_opted_out: int = 0
     other_group: int = 0
+    errors: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return dict(self.__dict__)
@@ -110,6 +113,13 @@ class Receiver:
     port: int
     group_id: str
     cache: Cache
+    # PRIVACY.md tells members an opt-out drops their messages "at the point of
+    # collection". Optional so a receiver can run before a roster exists, but
+    # when it is set the promise is kept literally: an opted-out member's
+    # messages are never written to the cache at all, rather than being cached
+    # and filtered later at transcript-build time. That distinction is the
+    # difference between the sentence being true and being nearly true.
+    roster: Roster | None = None
     stats: ReceiverStats = field(default_factory=ReceiverStats)
     _stop: bool = False
 
@@ -140,6 +150,10 @@ class Receiver:
             self.stats.dropped_bot_echo += 1
             return
 
+        if self.roster is not None and is_opted_out(self.roster, msg.source):
+            self.stats.dropped_opted_out += 1
+            return
+
         if self.cache.apply(msg):
             self.stats.stored += 1
         else:
@@ -165,7 +179,28 @@ class Receiver:
                     # Never log the frame: it may contain message content.
                     log.warning("discarding unparseable frame", extra={"bytes": len(line)})
                     continue
-                (on_frame or self._handle)(frame)
+                handler = on_frame or self._handle
+                try:
+                    handler(frame)
+                except Exception as exc:  # noqa: BLE001 - see below
+                    # One frame must never end the loop. Only OSError and
+                    # socket.timeout were caught before, so anything raised
+                    # while handling a message -- a parser bug on a crafted
+                    # envelope, a cache error -- escaped run_forever and killed
+                    # the receiver. Because the message was never acknowledged
+                    # to Signal, the restart redelivered it and the process
+                    # crashed again: a single hostile message could stop all
+                    # collection indefinitely.
+                    #
+                    # Skipping loses that one message, which is the cost. The
+                    # alternative loses every message from then on. It is
+                    # counted, not swallowed: a rising `errors` is the signal
+                    # that something needs a human.
+                    self.stats.errors += 1
+                    log.exception(
+                        "frame handler failed; skipping this message",
+                        extra={"error": type(exc).__name__},
+                    )
 
     # -- forever -------------------------------------------------------------
 
@@ -185,6 +220,15 @@ class Receiver:
                 log.warning(
                     "receiver connection failed; retrying",
                     extra={"error": type(exc).__name__, "backoff_s": round(backoff, 1)},
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Backstop for anything the per-frame guard does not cover, such
+                # as a failure in read_lines itself. "Never gives up" in the
+                # docstring above has to mean it, or the promise is decorative.
+                self.stats.errors += 1
+                log.exception(
+                    "receiver loop failed; reconnecting",
+                    extra={"error": type(exc).__name__},
                 )
             if self._stop:
                 return

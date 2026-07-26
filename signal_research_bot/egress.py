@@ -35,10 +35,22 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .identity import Roster
+# The bare-digit-run rule and its validity check live in redact.py, where
+# libphonenumber is already a hard dependency. Importing them keeps one
+# definition of "is this a phone number" rather than two that can drift.
+from .redact import BARE_DIGIT_RUN_RE, is_dialable
 
-# Characters that render as nothing but break a naive substring match.
+# Characters that render as nothing -- or that reorder what is rendered --
+# but break a naive substring match. The bidi controls are here because they
+# are equally effective at it: RLO inside a name survives NFKC, renders as
+# nothing on its own, and splits the token for every regex in this file.
 _INVISIBLE = dict.fromkeys(
-    map(ord, "​‌‍⁠﻿­͏"), None
+    [0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0x034F, 0x180E]
+    + list(range(0x200E, 0x2010))          # LRM, RLM, and the bidi marks
+    + list(range(0x202A, 0x202F))          # LRE, RLE, PDF, LRO, RLO
+    + list(range(0x2066, 0x206A))          # LRI, RLI, FSI, PDI
+    + list(range(0xFFF9, 0xFFFC)),         # interlinear annotation
+    None,
 )
 
 SPEAKER_RE = re.compile(r"\bParticipant\s+([A-Z]{1,3})\b")
@@ -72,7 +84,23 @@ class EgressViolation(Exception):
 
 def _normalise(text: str) -> str:
     folded = unicodedata.normalize("NFKC", text).translate(_INVISIBLE)
-    return folded.replace("\\", "/")
+    folded = folded.replace("\\", "/")
+    if folded.isascii():
+        return folded
+    # Non-ASCII decimal digits. NFKC folds fullwidth digits but NOT Arabic-Indic,
+    # Devanagari, or the dozen other decimal scripts -- and every phone rule
+    # below matches ASCII `\d`. Without this, a phone number typed in Eastern
+    # Arabic numerals passes the firewall untouched.
+    out = []
+    for ch in folded:
+        if ch.isdigit() and not ch.isascii():
+            try:
+                out.append(str(unicodedata.digit(ch)))
+                continue
+            except (TypeError, ValueError):
+                pass
+        out.append(ch)
+    return "".join(out)
 
 
 def _sha(text: str) -> str:
@@ -80,7 +108,7 @@ def _sha(text: str) -> str:
 
 
 def _digits(text: str) -> str:
-    return re.sub(r"\D", "", text)
+    return re.sub(r"[^0-9]", "", text)
 
 
 @dataclass(frozen=True)
@@ -165,6 +193,18 @@ def _assert_no_identity_shapes(text: str, sha: str) -> None:
         if len(_digits(match.group())) >= 9:
             raise EgressViolation(
                 "separated-phone", "text matching separated-phone is present", sha
+            )
+
+    # A bare run of digits with no '+' and no separators is a phone number that
+    # every rule above misses -- E164_RE requires the '+', SEPARATED_PHONE_RE
+    # requires a separator. It is only blocked when libphonenumber says the run
+    # is a real assignable number, because this archive is full of large figures
+    # that are not phone numbers and blocking those would wedge every window
+    # that discusses a balance sheet.
+    for match in BARE_DIGIT_RUN_RE.finditer(text):
+        if is_dialable(match.group(1)):
+            raise EgressViolation(
+                "bare-phone", "text matching a dialable number is present", sha
             )
 
 

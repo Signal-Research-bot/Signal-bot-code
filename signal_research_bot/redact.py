@@ -28,6 +28,7 @@ IBANs, UUIDs and roster names have no such exemption -- they are always removed.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -96,6 +97,90 @@ LOOSE_PHONE_RE = re.compile(
     r")(?![\w])"
 )
 
+# A contiguous run of digits with no '+', no trunk zero and no separators --
+# "whatsapp 447700900123". Every rule above requires one of those three, so this
+# form passed redaction untouched, and it passed the firewall too because the
+# E.164 rule requires the '+'.
+#
+# It cannot simply be redacted on shape: this pipeline exists to read a finance
+# chat, where "127000000000" is a reserves figure and blanking it destroys the
+# content the project is for. The discriminator is libphonenumber's
+# `is_valid_number` against the run read as an international number, which
+# checks it against real national numbering plans -- so a genuine mobile is
+# caught and a balance sheet figure is not. Verified both ways in the tests.
+BARE_DIGIT_RUN_RE = re.compile(r"(?<![\w+])(\d{10,15})(?![\w])")
+
+
+# Characters that render as nothing, or that reorder what is rendered, and
+# whose only use in a chat message is to break a pattern match. Kept in sync
+# with egress._INVISIBLE -- see the note there on why bidi controls belong in
+# this set even though they are not strictly invisible.
+_ZERO_WIDTH = dict.fromkeys(
+    [0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0x034F, 0x180E]
+    + list(range(0x200E, 0x2010))          # LRM, RLM, and the bidi marks
+    + list(range(0x202A, 0x202F))          # LRE, RLE, PDF, LRO, RLO
+    + list(range(0x2066, 0x206A))          # LRI, RLI, FSI, PDI
+    + list(range(0xFFF9, 0xFFFC)),         # interlinear annotation
+    None,
+)
+
+
+def fold_confusables(text: str) -> str:
+    """Normalise text so a pattern match cannot be dodged by encoding.
+
+    Two evasions this closes, both verified against the shipped rules:
+
+    * **Non-ASCII decimal digits.** `str.isdigit()` is true for Arabic-Indic
+      "٤٤٧..." and a dozen other scripts, but every phone rule in this module
+      and in egress.py matches `\\d` against ASCII or strips with `[^0-9]`.
+      NFKC does *not* fold them -- it folds fullwidth forms only. So a phone
+      number typed in Eastern Arabic numerals passed every control. Digits are
+      mapped through `unicodedata.digit()`, which knows all of them.
+    * **Zero-width and bidi characters.** A soft hyphen inside a name defeats a
+      substring match while rendering identically.
+
+    Applied at the *start* of redaction rather than the end, so every layer
+    downstream sees folded text.
+    """
+    folded = unicodedata.normalize("NFKC", text).translate(_ZERO_WIDTH)
+    if folded.isascii():
+        return folded
+    out = []
+    for ch in folded:
+        if ch.isdigit() and not ch.isascii():
+            try:
+                out.append(str(unicodedata.digit(ch)))
+                continue
+            except (TypeError, ValueError):
+                pass
+        out.append(ch)
+    return "".join(out)
+
+
+def is_dialable(digits: str) -> bool:
+    """True if a bare run of digits is a real, assignable phone number.
+
+    Read as an international number and checked against libphonenumber's
+    national numbering plans. This is deliberately *validity*, not
+    *possibility*: `is_possible_number` only checks length for the country
+    code, so it would call a ten-digit reserves figure beginning "32" a
+    plausible Belgian number and redact it.
+
+    Consequence worth stating plainly: numbers in the ranges reserved for
+    fiction and documentation -- +44 7700 900xxx, some +1 555 -- are not valid,
+    so they are not caught by this rule. They do not belong to anyone, which is
+    why the trade is acceptable, but it does mean a test written with a "safe"
+    example number will not exercise this path.
+    """
+    import phonenumbers  # noqa: PLC0415
+
+    if not 10 <= len(digits) <= 15:
+        return False
+    try:
+        return phonenumbers.is_valid_number(phonenumbers.parse("+" + digits, None))
+    except Exception:  # noqa: BLE001 - unparseable is not a phone number
+        return False
+
 
 class RedactionUnavailable(RuntimeError):
     """A required redaction dependency or input is missing."""
@@ -145,9 +230,15 @@ class Redactor:
     # -- individual layers ----------------------------------------------------
 
     def _strip_names(self, text: str, fired: list[str]) -> str:
-        for raw, pattern in self._name_res:
+        # The rule name is written to metrics.jsonl and to logs. It used to
+        # carry the first two characters of the matched name, which put real
+        # member names -- partially, but recognisably in a group of eight --
+        # into a file kept for cost analysis. The roster index is as useful for
+        # tuning ("variant 3 never fires") and identifies nobody to a reader
+        # who does not already hold the roster.
+        for index, (_raw, pattern) in enumerate(self._name_res):
             if pattern.search(text):
-                fired.append(f"roster-name:{raw[:2]}***")
+                fired.append(f"roster-name:{index}")
                 text = pattern.sub(PLACEHOLDER_NAME, text)
         return text
 
@@ -165,6 +256,10 @@ class Redactor:
             digits = sum(c.isdigit() for c in m.group())
             # >= 9 so an ISO date (8 digits) is not read as a phone number.
             if 9 <= digits <= 15:
+                spans.append((m.start(), m.end()))
+
+        for m in BARE_DIGIT_RUN_RE.finditer(text):
+            if is_dialable(m.group(1)):
                 spans.append((m.start(), m.end()))
 
         if not spans:
@@ -211,6 +306,7 @@ class Redactor:
         if not text:
             return RedactionResult("")
 
+        text = fold_confusables(text)
         lowered = text.lower()
         for term in self.sensitive_terms:
             if term and term in lowered:
@@ -220,21 +316,34 @@ class Redactor:
                     drop_reason="matched a special-category term",
                 )
 
-        # Layer order matters. Self-contained tokens (email, uuid, iban) go
-        # first: a roster name inside an address is otherwise substituted mid-
-        # token, and the mangled remainder no longer matches the email rule --
-        # leaving the domain exposed. Names last, over whatever survives.
+        # Layer order matters, and every one of these orderings was got wrong
+        # first and fixed after a test or an audit found the leak.
+        #
+        # Self-contained tokens (email, uuid, iban) go first: a roster name
+        # inside an address is otherwise substituted mid-token, and the mangled
+        # remainder no longer matches the email rule -- leaving the domain
+        # exposed.
+        #
+        # The group name goes before names for the same reason one layer down.
+        # A group called "Ravenhill Investors" whose roster contains "Ravenhill"
+        # became "[participant] Investors" when names ran first: the group-name
+        # pattern no longer matched, so the distinctive remainder survived and
+        # went to Anthropic. Multi-token names are the common case, so this is
+        # not an edge case.
+        #
+        # Names run last, over whatever survives.
         fired: list[str] = []
         out = self._strip_simple(text, fired)
         out = self._strip_phones(out, fired)
         out, kept_urls, kept_addresses = self._contextual(out, fired)
-        out = self._strip_names(out, fired)
 
         if self.roster.group_name:
             pattern = re.compile(rf"(?<!\w){re.escape(self.roster.group_name)}(?!\w)", re.I)
             if pattern.search(out):
                 fired.append("group-name")
                 out = pattern.sub("[group]", out)
+
+        out = self._strip_names(out, fired)
 
         return RedactionResult(
             text=out,

@@ -28,7 +28,12 @@ COPY tools/ ./tools/
 ENV SRB_CACHE_DIR=/cache \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
-RUN mkdir -p /cache && chown -R worker:worker /cache /app
+# /cache is the only thing the runtime user may write. /app stays root-owned and
+# read-only to `worker`: application code that the process running it can rewrite
+# turns any file-write bug into persistence, and nothing here needs to modify its
+# own source.
+RUN mkdir -p /cache && chown -R worker:worker /cache && chown -R root:root /app \
+ && chmod -R go-w /app
 VOLUME ["/cache"]
 
 USER worker

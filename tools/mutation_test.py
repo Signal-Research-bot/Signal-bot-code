@@ -28,7 +28,17 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EGRESS = REPO_ROOT / "signal_research_bot" / "egress.py"
 CLIENT = REPO_ROOT / "signal_research_bot" / "claude" / "client.py"
-SUITE = "tests/test_egress.py tests/test_client.py"
+# The pre-launch audit found leaks in modules upstream of the firewall, so the
+# mutations below cover those too. The suite has to widen with them: a mutation
+# in transcript.py that no test in SUITE exercises would "survive" for the
+# uninteresting reason that nothing ran against it.
+TRANSCRIPT = REPO_ROOT / "signal_research_bot" / "transcript.py"
+ENVELOPE = REPO_ROOT / "signal_research_bot" / "envelope.py"
+RENDER = REPO_ROOT / "signal_research_bot" / "kb" / "render.py"
+SUITE = (
+    "tests/test_egress.py tests/test_client.py tests/test_transcript.py "
+    "tests/test_envelope.py tests/test_redact.py tests/test_kb.py"
+)
 
 
 @dataclass(frozen=True)
@@ -99,6 +109,66 @@ MUTATIONS: tuple[Mutation, ...] = (
         'if getattr(response, "stop_reason", None) == "refusal":',
         'if False and getattr(response, "stop_reason", None) == "refusal":',
         CLIENT,
+    ),
+    # --- controls added by the pre-launch audit ------------------------------
+    #
+    # Each reverts one audit fix. The fix is not the deliverable; a test that
+    # would notice the fix being undone is.
+    Mutation(
+        "bare-digit phone rule removed from the firewall",
+        "for match in BARE_DIGIT_RUN_RE.finditer(text):",
+        "for match in ():",
+    ),
+    Mutation(
+        "phone validity always false (bare numbers pass)",
+        "if is_dialable(match.group(1)):",
+        "if False and is_dialable(match.group(1)):",
+    ),
+    Mutation(
+        "phone validity always true (reserves figures blocked)",
+        "if is_dialable(match.group(1)):",
+        "if True or is_dialable(match.group(1)):",
+    ),
+    Mutation(
+        "non-ascii digit folding removed",
+        "if ch.isdigit() and not ch.isascii():",
+        "if False:",
+    ),
+    Mutation(
+        "opt-out ignores who is being quoted",
+        "if msg.quote_text and not is_opted_out(self.roster, msg.quote_author):",
+        "if msg.quote_text:",
+        TRANSCRIPT,
+    ),
+    Mutation(
+        "prompt-structure tokens passed through verbatim",
+        'return f"{speaker}: {prefix}{self._defang(text)}{suffix}"',
+        'return f"{speaker}: {prefix}{text}{suffix}"',
+        TRANSCRIPT,
+    ),
+    Mutation(
+        "mention surrogate guard removed",
+        "if splits_surrogate(lo) or splits_surrogate(hi):",
+        "if False:",
+        ENVELOPE,
+    ),
+    Mutation(
+        "negative mention start/length accepted",
+        "if m.length < 0 or m.start < 0:",
+        "if False:",
+        ENVELOPE,
+    ),
+    Mutation(
+        "envelope-level edits dropped again",
+        'edit = envelope.get("editMessage")',
+        "edit = None",
+        ENVELOPE,
+    ),
+    Mutation(
+        "frontmatter title interpolated raw",
+        'f"title: {_yaml_str(title)}",',
+        'f"title: {title}",',
+        RENDER,
     ),
 )
 

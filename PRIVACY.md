@@ -37,7 +37,13 @@ The consequences you should know about:
 
 ## What is removed before anything leaves the machine
 
-- Phone numbers, in any format
+- Phone numbers — with or without a country code, with or without separators,
+  and written in non-Latin numerals. A member's own number, if it is on the
+  roster, is caught in **any** form. Someone else's number is caught when it is
+  a real, assignable number; the ranges reserved for fiction and documentation
+  (`+44 7700 900xxx`, some `+1 555`) are not caught, because they belong to
+  nobody, and the same check that recognises real numbers is what stops a
+  reserves figure like `127000000000` being blanked out of the research.
 - Names, nicknames, and @mentions of group members, including possessives
 - Email addresses, account IDs, IBANs
 - The group's name and ID

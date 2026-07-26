@@ -20,6 +20,11 @@ from typing import Any
 # Characters Obsidian and Windows will not accept in a filename.
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _WS = re.compile(r"\s+")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# A value that cannot change YAML's meaning: no quotes, colons, brackets,
+# commas, comment markers, indicators or leading/trailing space. Enum values
+# and ISO dates match; a model-authored title does not.
+_BARE_SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def slug(title: str, max_len: int = 120) -> str:
@@ -35,10 +40,39 @@ def title_for(question: str, month: str) -> str:
     return f"Research - {condensed} - {month}"
 
 
+def _yaml_str(value: Any) -> str:
+    """One YAML scalar, safe for any input.
+
+    Every value in the frontmatter block below is model-authored, and the model
+    is summarising attacker-controlled chat. Interpolating those straight into
+    `f"title: {title}"` let a newline in the title close the scalar and open
+    arbitrary further keys -- so a member could dictate frontmatter on a page in
+    a repo other members read, including keys that change how Obsidian renders
+    it. Escaping here rather than at each call site means a new field cannot
+    forget to do it.
+
+    Simple tokens (`answered`, `2026-07-25`) are emitted bare, because the
+    operator's existing vault writes them that way and a quoted enum reads as a
+    different value to a human skimming the file. Anything else is quoted.
+    """
+    text = _CONTROL.sub("", _WS.sub(" ", str(value)).strip())
+    if _BARE_SAFE.fullmatch(text):
+        return text
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def _yaml_list(values: list[str]) -> str:
     if not values:
         return "[]"
-    return "[" + ", ".join(f'"{v}"' for v in values) + "]"
+    # List items are always quoted: the existing vault quotes them, and a bare
+    # item containing `,` or `]` would change the list's length rather than its
+    # contents -- a failure that reads as valid YAML.
+    return "[" + ", ".join(
+        '"' + _CONTROL.sub("", _WS.sub(" ", str(v)).strip())
+        .replace("\\", "\\\\").replace('"', '\\"') + '"'
+        for v in values
+    ) + "]"
 
 
 def frontmatter(record: dict[str, Any], *, title: str, first_raised: str,
@@ -47,13 +81,13 @@ def frontmatter(record: dict[str, Any], *, title: str, first_raised: str,
     return "\n".join(
         [
             "---",
-            f"title: {title}",
+            f"title: {_yaml_str(title)}",
             "entity_type: research_task",
-            f"research_status: {record['research_status']}",
-            f"finding: {record.get('finding', 'unestablished')}",
-            f"confidence: {record['confidence']}",
-            f"first_raised: {first_raised}",
-            f"last_verified: {last_verified}",
+            f"research_status: {_yaml_str(record['research_status'])}",
+            f"finding: {_yaml_str(record.get('finding', 'unestablished'))}",
+            f"confidence: {_yaml_str(record['confidence'])}",
+            f"first_raised: {_yaml_str(first_raised)}",
+            f"last_verified: {_yaml_str(last_verified)}",
             f"tags: {_yaml_list(tags)}",
             f"sources: {_yaml_list([e['url'] for e in record.get('evidence') or []])}",
             f"related: {_yaml_list(related or [])}",
@@ -62,15 +96,20 @@ def frontmatter(record: dict[str, Any], *, title: str, first_raised: str,
     )
 
 
+def _cell(value: Any) -> str:
+    """One Markdown table cell. A raw `|` or newline would break the table."""
+    return _CONTROL.sub("", _WS.sub(" ", str(value)).replace("|", "\\|")).strip()
+
+
 def _evidence_table(evidence: list[dict[str, Any]]) -> str:
     if not evidence:
         return "_No sources were retrieved for this entry._"
     rows = ["| Source | Quote | Confidence |", "| --- | --- | --- |"]
     for item in evidence:
-        quote = item["quote"].replace("|", "\\|").replace("\n", " ").strip()
+        quote = _cell(item["quote"])
         if len(quote) > 300:
             quote = quote[:297] + "..."
-        rows.append(f"| {item['url']} | {quote} | {item['confidence']} |")
+        rows.append(f"| {_cell(item['url'])} | {quote} | {_cell(item['confidence'])} |")
     return "\n".join(rows)
 
 
@@ -83,7 +122,10 @@ def _bullets(items: list[str], empty: str) -> str:
 def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
            related: list[str] | None = None) -> tuple[str, str]:
     """Return (filename_stem, markdown)."""
-    title = record["title"]
+    # Collapsed once, here, so the frontmatter scalar, the H1 and the filename
+    # all agree. A multi-line title otherwise produces a heading that silently
+    # continues into body text.
+    title = _WS.sub(" ", str(record["title"])).strip() or "Untitled"
     parts = [
         frontmatter(
             record, title=title, first_raised=first_raised,

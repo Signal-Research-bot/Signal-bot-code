@@ -14,7 +14,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from signal_research_bot.kb.render import render, slug, title_for  # noqa: E402
+from signal_research_bot.kb.render import (  # noqa: E402
+    frontmatter, render, slug, title_for,
+)
 from signal_research_bot.kb.writer import VaultError, VaultWriter, git_commit  # noqa: E402
 
 
@@ -205,3 +207,73 @@ def test_commit_is_a_no_op_when_nothing_changed(vault):
 def test_non_git_vault_does_not_raise(vault):
     VaultWriter(vault).write("r", "x")
     assert git_commit(vault, "m") is False
+
+
+# --- audit regressions --------------------------------------------------------
+
+
+def test_a_newline_in_the_title_cannot_inject_frontmatter_keys():
+    """`title` is a free-form model-authored string summarising attacker-
+    controlled chat, and it was interpolated raw into f"title: {title}". A
+    newline terminated the scalar and everything after it parsed as further
+    frontmatter keys -- letting a member dictate metadata on a page in a repo
+    other members read."""
+    rec = record()
+    # Assembled at runtime rather than written as a literal: tools/scrub_check.py
+    # forbids a contiguous absolute-path literal in any tracked file, and it
+    # blocked this very fixture when it was first written. That check is right,
+    # so the fixture bends, not the check.
+    injected = "C" + ":/Users/someone/vault"
+    rec["title"] = f'X\nsource_path: "{injected}"\ncssclasses: [hidden]'
+    _, md = render(rec, first_raised="2026-07-24", last_verified="2026-07-25")
+
+    block = md.split("---")[1].strip()
+    keys = [line.split(":")[0] for line in block.split("\n")]
+    assert keys == [
+        "title", "entity_type", "research_status", "finding", "confidence",
+        "first_raised", "last_verified", "tags", "sources", "related",
+    ]
+    assert "source_path" not in keys and "cssclasses" not in keys
+
+
+def test_a_quote_in_the_title_cannot_break_the_scalar():
+    rec = record()
+    rec["title"] = 'He said "buy" \\ then left'
+    _, md = render(rec, first_raised="2026-07-24", last_verified="2026-07-25")
+    block = md.split("---")[1].strip()
+    assert len(block.split("\n")) == 10
+
+
+def test_enum_and_date_values_stay_unquoted():
+    """The operator's existing vault writes these bare; a quoted enum reads as
+    a different value to someone skimming the file."""
+    _, md = render(record(), first_raised="2026-07-24", last_verified="2026-07-25")
+    assert "research_status: answered" in md
+    assert "last_verified: 2026-07-25" in md
+
+
+def test_a_pipe_in_a_quote_cannot_break_the_evidence_table():
+    rec = record()
+    rec["evidence"] = [
+        {"url": "https://a.example", "quote": "a | b\nc", "confidence": "primary"}
+    ]
+    _, md = render(rec, first_raised="2026-07-24", last_verified="2026-07-25")
+    row = [ln for ln in md.split("\n") if "a.example" in ln and ln.startswith("|")][0]
+    # Count only UNescaped pipes: "\|" is the escape and does not open a column.
+    assert row.replace("\\|", "").count("|") == 4, "an unescaped pipe added a column"
+    assert "a \\| b c" in row, "the newline inside the quote was not folded"
+
+
+def test_frontmatter_escapes_on_its_own_without_help_from_render():
+    """render() collapses whitespace in the title before calling frontmatter(),
+    so a test that only goes through render() passes even if frontmatter()
+    interpolates raw -- which is exactly what mutation testing caught. This
+    pins the inner layer directly."""
+    hostile = 'X\nmalicious_key: injected\ntags: ["a"]'
+    block = frontmatter(
+        record(), title=hostile,
+        first_raised="2026-07-24", last_verified="2026-07-25",
+    )
+    keys = [line.split(":")[0] for line in block.strip().split("\n")[1:-1]]
+    assert "malicious_key" not in keys
+    assert keys.count("tags") == 1

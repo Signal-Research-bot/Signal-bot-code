@@ -95,11 +95,55 @@ def _payload(envelope: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     if isinstance(data, dict):
         return data, envelope.get("sourceUuid") or envelope.get("source") or ""
 
-    sent = (envelope.get("syncMessage") or {}).get("sentMessage")
+    # An edit from another member arrives as an envelope-level `editMessage`
+    # wrapping its own dataMessage -- there is no top-level dataMessage at all.
+    # Checking only the two branches above dropped every edit anyone else made,
+    # silently, leaving the un-edited original as the archived version. The
+    # kind/target detection further down already knew about editMessage; it just
+    # never ran, because this function returned None first.
+    edit = envelope.get("editMessage")
+    if isinstance(edit, dict) and isinstance(edit.get("dataMessage"), dict):
+        return (
+            edit["dataMessage"],
+            envelope.get("sourceUuid") or envelope.get("source") or "",
+        )
+
+    sync = envelope.get("syncMessage") or {}
+    sent = sync.get("sentMessage")
     if isinstance(sent, dict):
+        # The operator's own edit: syncMessage.sentMessage.editMessage, or
+        # syncMessage.editMessage depending on the signal-cli path.
+        inner = sent.get("editMessage")
+        if isinstance(inner, dict) and isinstance(inner.get("dataMessage"), dict):
+            return inner["dataMessage"], SELF
         return sent, SELF
 
+    sync_edit = sync.get("editMessage")
+    if isinstance(sync_edit, dict):
+        nested = sync_edit.get("dataMessage") or (
+            sync_edit.get("sentMessage") or {}
+        ).get("dataMessage")
+        if isinstance(nested, dict):
+            return nested, SELF
+
     return None, ""
+
+
+def _edit_target(envelope: dict[str, Any], payload: dict[str, Any]) -> int | None:
+    """The timestamp of the message an edit supersedes, if this is an edit."""
+    sync = envelope.get("syncMessage") or {}
+    for holder in (
+        payload,
+        envelope.get("editMessage"),
+        (sync.get("sentMessage") or {}).get("editMessage"),
+        sync.get("editMessage"),
+    ):
+        if not isinstance(holder, dict):
+            continue
+        target = holder.get("editTargetTimestamp") or holder.get("targetSentTimestamp")
+        if target:
+            return int(target)
+    return None
 
 
 def _mentions(payload: dict[str, Any]) -> tuple[Mention, ...]:
@@ -150,14 +194,9 @@ def parse(envelope: dict[str, Any], target_group_id: str) -> ParsedMessage | Non
 
     quote = payload.get("quote") or {}
     kind = Kind.MESSAGE
-    target = None
-    if payload.get("editTargetTimestamp") or envelope.get("editMessage"):
+    target = _edit_target(envelope, payload)
+    if target is not None:
         kind = Kind.EDIT
-        target = int(
-            payload.get("editTargetTimestamp")
-            or (envelope.get("editMessage") or {}).get("targetSentTimestamp")
-            or 0
-        )
 
     return ParsedMessage(
         kind=kind,
@@ -188,18 +227,64 @@ def substitute_mentions(body: str, mentions: tuple[Mention, ...], label_for) -> 
     than a code review.
 
     `label_for` maps a Mention to its replacement text.
+
+    Offsets arrive over the network and are attacker-controlled. Three ways a
+    crafted mention breaks a naive implementation, all found by audit:
+
+    * A `start` that lands *inside* a surrogate pair splits an emoji in half.
+      The remaining lone surrogate is not decodable, so `.decode()` raises
+      UnicodeDecodeError -- which, in the receive loop, stalls the pipeline on
+      every subsequent poll because the message is redelivered forever.
+    * A negative `length` makes `hi < lo`, and `buf[:lo] + label + buf[hi:]`
+      then *duplicates* the bytes between them instead of replacing anything.
+    * Overlapping spans let a later substitution land inside the label written
+      by an earlier one.
+
+    Each is handled by skipping that mention. A mention we cannot apply is
+    strictly better left as raw text: the body still passes redaction and the
+    egress firewall afterwards, so a skipped mention cannot leak an identity.
     """
     if not mentions:
         return body
 
     buf = body.encode("utf-16-le")
+    limit = len(buf)
+
+    def splits_surrogate(offset: int) -> bool:
+        """True if `offset` falls between the halves of a surrogate pair."""
+        if offset <= 0 or offset >= limit:
+            return False
+        # A UTF-16-LE high surrogate is 0xD800-0xDBFF, stored little-endian, so
+        # the *second* byte of the unit carries the tag.
+        unit = int.from_bytes(buf[offset - 2 : offset], "little")
+        return 0xD800 <= unit <= 0xDBFF
+
     # Descending, so an earlier replacement cannot invalidate a later offset.
+    consumed = limit  # low-water mark of what later (higher) spans already took
     for m in sorted(mentions, key=lambda m: m.start, reverse=True):
+        # Rejecting a negative start or length here makes `hi < lo` unreachable
+        # below, so there is no separate inverted-span check: dead code in a
+        # parser handling hostile input is worse than the redundancy is worth,
+        # and mutation testing flags it as an untestable branch.
+        if m.length < 0 or m.start < 0:
+            continue
         lo, hi = m.start * 2, (m.start + m.length) * 2
-        if lo < 0 or hi > len(buf):
-            continue  # offsets outside the body: ignore rather than corrupt it
+        if hi > limit:
+            continue  # the span runs past the end of the body
+        if hi > consumed:
+            continue  # overlaps a span already substituted
+        if splits_surrogate(lo) or splits_surrogate(hi):
+            continue  # would leave an undecodable lone surrogate
         buf = buf[:lo] + label_for(m).encode("utf-16-le") + buf[hi:]
-    return buf.decode("utf-16-le")
+        consumed = lo
+
+    try:
+        return buf.decode("utf-16-le")
+    except UnicodeDecodeError:
+        # Belt and braces. The guards above should make this unreachable, but
+        # the alternative to a lossy decode here is a poison message that stalls
+        # the receiver forever, and that trade is not close.
+        return buf.decode("utf-16-le", errors="replace")
 
 
 @dataclass

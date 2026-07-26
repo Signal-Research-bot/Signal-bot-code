@@ -231,6 +231,13 @@ def _suppressed(lines: list[str], idx: int) -> set[str]:
     return names
 
 
+NON_UTF8_HINT = (
+    "Not UTF-8, so it could not be scanned as text. Convert it to UTF-8, or "
+    "add its extension to SKIP_SUFFIXES if it is genuinely binary."
+)
+UNREADABLE_HINT = "Could not be read. Fix permissions, or remove it from the repo."
+
+
 def scan(
     paths: list[Path], rules: list[Rule]
 ) -> tuple[list[tuple[str, int, str, str]], int]:
@@ -248,8 +255,21 @@ def scan(
             continue
         try:
             text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue  # binary or unreadable; nothing to leak in text form
+        except OSError:
+            findings.append((rel, 0, "unreadable-file", UNREADABLE_HINT))
+            continue
+        except UnicodeDecodeError:
+            # Skipping this silently made the checker fail OPEN, which is the
+            # one thing it must not do: a tracked file holding an identifier in
+            # UTF-16 or latin-1 would sail past a "clean" report. Binary files
+            # are excluded by SKIP_SUFFIXES above; anything else that is not
+            # UTF-8 is either a mistake or an evasion, and both want a human.
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                findings.append((rel, 0, "unreadable-file", UNREADABLE_HINT))
+                continue
+            findings.append((rel, 0, "non-utf8-file", NON_UTF8_HINT))
 
         lines = _normalise(text).splitlines()
         for idx, line in enumerate(lines):
@@ -268,6 +288,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--all", action="store_true", help="scan every tracked file")
     ap.add_argument("--paths", nargs="*", default=[], help="explicit paths to scan")
+    ap.add_argument(
+        "--vault",
+        metavar="DIR",
+        help="also scan a knowledge-base vault (Markdown). README claimed this "
+             "tool protected BOTH repositories while only ever scanning this "
+             "one; the vault is the repo members actually read.",
+    )
     ap.add_argument(
         "--structural-only",
         action="store_true",
@@ -288,6 +315,19 @@ def main() -> int:
     else:
         rules = STRUCTURAL_RULES + token_rules(load_tokens())
     paths = target_files("all" if args.all else "staged", args.paths)
+
+    if args.vault:
+        vault = Path(args.vault).expanduser()
+        if not vault.is_dir():
+            print(f"scrub_check: --vault {vault.name} is not a directory", file=sys.stderr)
+            return 2
+        vault_files = sorted(
+            p for p in vault.rglob("*")
+            if p.is_file() and ".git" not in p.parts and p.suffix.lower() != ".png"
+        )
+        if not vault_files:
+            print(f"scrub_check: WARNING -- --vault {vault.name} contains no files.")
+        paths = paths + vault_files
 
     if not paths:
         print("scrub_check: nothing to scan.")

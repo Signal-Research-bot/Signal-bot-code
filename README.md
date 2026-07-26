@@ -58,8 +58,20 @@ same checks before it can reach the archive.
 
 **[`tools/scrub_check.py`](tools/scrub_check.py) — protects the operator.**
 Blocks the operator's name, emails, username, hostname and any absolute path
-from reaching either repository. Runs in pre-commit *and* CI, because
-pre-commit alone is bypassable.
+from being committed. Runs in pre-commit *and* CI, because pre-commit alone is
+bypassable.
+
+It scans **this** repository automatically. The knowledge-base vault is a
+separate repository and the hook does not reach it, so it has to be passed
+explicitly:
+
+```bash
+python -m tools.scrub_check --all --vault /path/to/vault
+```
+
+That used to read "either repository", which was not true of anything the tool
+did — and the first vault scan run after fixing it found a real over-claim in
+the vault's own README.
 
 Neither may be weakened to make a test pass. If you are contributing and a
 check blocks you, the check is probably right.
@@ -85,13 +97,13 @@ Requires Docker. Nothing is installed on the host.
 
 ```bash
 cp .env.example .env          # then fill it in; it is gitignored
-docker compose -f docker/docker-compose.yml build
+docker compose build
 ```
 
 **1. Link as a device on your Signal account.** One-time and interactive:
 
 ```bash
-docker compose -f docker/docker-compose.yml --profile link run --rm link
+docker compose --profile link run --rm link
 ```
 
 Scan the printed `sgnl://` URI from your phone. Choose **"Don't Transfer"** —
@@ -101,7 +113,7 @@ offer.
 **2. Find the group ID** and put it in `.env` as `SRB_GROUP_ID`:
 
 ```bash
-docker compose -f docker/docker-compose.yml exec signal-cli \
+docker compose exec signal-cli \
   signal-cli --config /data listGroups
 ```
 
@@ -113,13 +125,13 @@ misspellings, and every phone number format people actually use.
 **4. Start collecting.**
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d
+docker compose up -d
 ```
 
 **5. Run a batch** (schedule this via Task Scheduler or cron):
 
 ```bash
-docker compose -f docker/docker-compose.yml --profile batch run --rm batch
+docker compose --profile batch run --rm batch
 ```
 
 ## Before you turn it on

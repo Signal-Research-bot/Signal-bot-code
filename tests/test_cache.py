@@ -200,3 +200,38 @@ def test_state_upsert(cache):
     cache.set_state("k", "1")
     cache.set_state("k", "2")
     assert cache.get_state("k") == "2"
+
+
+def test_a_delete_that_arrives_before_its_target_still_takes_effect(cache):
+    """retract() is an UPDATE, so when a remoteDelete overtook its own target
+    the UPDATE matched nothing and the deletion was silently forgotten. The
+    original then arrived, was stored as an ordinary message, and would be
+    researched and published -- the exact opposite of what PRIVACY.md promises.
+    Reordering across a reconnect makes this ordinary, not exotic."""
+    target_ts = TS
+    cache.apply(ParsedMessage(
+        kind=Kind.DELETE, group_id='g', source=ALICE,
+        timestamp_ms=TS, target_timestamp_ms=target_ts, raw_timestamp_ms=TS + 1000,
+    ))
+    cache.apply(ParsedMessage(
+        kind=Kind.MESSAGE, group_id='g', source=ALICE, timestamp_ms=TS,
+        body="the message they deleted", raw_timestamp_ms=target_ts,
+    ))
+    bodies = [m.body for m in cache.pending()]
+    assert "the message they deleted" not in bodies
+
+
+def test_an_edit_that_arrives_before_its_original_supersedes_it(cache):
+    target_ts = TS
+    cache.apply(ParsedMessage(
+        kind=Kind.EDIT, group_id='g', source=ALICE, timestamp_ms=TS,
+        body="the corrected text", target_timestamp_ms=target_ts,
+        raw_timestamp_ms=TS + 1000,
+    ))
+    cache.apply(ParsedMessage(
+        kind=Kind.MESSAGE, group_id='g', source=ALICE, timestamp_ms=TS,
+        body="the original typo", raw_timestamp_ms=target_ts,
+    ))
+    bodies = [m.body for m in cache.pending()]
+    assert "the corrected text" in bodies
+    assert "the original typo" not in bodies

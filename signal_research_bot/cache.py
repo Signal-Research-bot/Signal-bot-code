@@ -46,6 +46,23 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_unprocessed
     ON messages (processed_window, coarse_timestamp);
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- Mutations that arrived BEFORE the message they refer to.
+--
+-- retract() and supersede() are UPDATEs, so when a remoteDelete overtakes its
+-- own target -- which reordering across a reconnect makes entirely possible --
+-- the UPDATE matched no rows and the deletion was silently forgotten. The
+-- original would then arrive, be stored as an ordinary message, and be
+-- researched and published. PRIVACY.md promises the opposite.
+--
+-- Recording the intent here means a late-arriving original is retracted or
+-- superseded the moment it lands.
+CREATE TABLE IF NOT EXISTS pending_mutations (
+    source            TEXT    NOT NULL,
+    target_timestamp  INTEGER NOT NULL,
+    kind              TEXT    NOT NULL,   -- 'delete' | 'edit'
+    by_timestamp      INTEGER,            -- the superseding message, for edits
+    PRIMARY KEY (source, target_timestamp, kind)
+);
 """
 
 
@@ -140,15 +157,31 @@ class Cache:
                 msg.attachment_count,
             ),
         )
-        return cur.rowcount > 0
+        inserted = cur.rowcount > 0
+        if inserted:
+            # A remoteDelete or edit can overtake the message it refers to.
+            # Applying it here is what makes "if you delete it, it is deleted
+            # here too" hold regardless of arrival order.
+            self._apply_pending_mutations(msg.source, msg.raw_timestamp_ms)
+        return inserted
 
     def retract(self, source: str, target_timestamp_ms: int) -> int:
-        """Tombstone a message the sender deleted for everyone."""
+        """Tombstone a message the sender deleted for everyone.
+
+        If the target has not arrived yet the intent is recorded, so the
+        deletion still takes effect when it does. See pending_mutations.
+        """
         cur = self.con.execute(
             "UPDATE messages SET retracted=1, body='' "
             "WHERE source=? AND raw_timestamp=?",
             (source, target_timestamp_ms),
         )
+        if cur.rowcount == 0:
+            self.con.execute(
+                "INSERT OR REPLACE INTO pending_mutations "
+                "(source, target_timestamp, kind, by_timestamp) VALUES (?, ?, 'delete', NULL)",
+                (source, target_timestamp_ms),
+            )
         return cur.rowcount
 
     def supersede(self, source: str, target_timestamp_ms: int, by_timestamp_ms: int) -> int:
@@ -158,7 +191,40 @@ class Cache:
             "UPDATE messages SET superseded_by=? WHERE source=? AND raw_timestamp=?",
             (by_timestamp_ms, source, target_timestamp_ms),
         )
+        if cur.rowcount == 0:
+            self.con.execute(
+                "INSERT OR REPLACE INTO pending_mutations "
+                "(source, target_timestamp, kind, by_timestamp) VALUES (?, ?, 'edit', ?)",
+                (source, target_timestamp_ms, by_timestamp_ms),
+            )
         return cur.rowcount
+
+    def _apply_pending_mutations(self, source: str, raw_timestamp_ms: int) -> None:
+        """Apply any mutation that arrived before this message did."""
+        rows = self.con.execute(
+            "SELECT kind, by_timestamp FROM pending_mutations "
+            "WHERE source=? AND target_timestamp=?",
+            (source, raw_timestamp_ms),
+        ).fetchall()
+        if not rows:
+            return
+        for kind, by_timestamp in rows:
+            if kind == "delete":
+                self.con.execute(
+                    "UPDATE messages SET retracted=1, body='' "
+                    "WHERE source=? AND raw_timestamp=?",
+                    (source, raw_timestamp_ms),
+                )
+            elif kind == "edit":
+                self.con.execute(
+                    "UPDATE messages SET superseded_by=? "
+                    "WHERE source=? AND raw_timestamp=?",
+                    (by_timestamp, source, raw_timestamp_ms),
+                )
+        self.con.execute(
+            "DELETE FROM pending_mutations WHERE source=? AND target_timestamp=?",
+            (source, raw_timestamp_ms),
+        )
 
     def apply(self, msg: ParsedMessage) -> bool:
         """Route a parsed message to the right write. Single entry point."""

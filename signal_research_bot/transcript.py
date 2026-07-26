@@ -17,6 +17,7 @@ Order matters and is not arbitrary:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -26,11 +27,28 @@ from .redact import Redactor, is_only_placeholders
 
 UNKNOWN_LABEL = "[participant]"
 
+# A message body is untrusted input that ends up inside a prompt, between
+# <transcript> delimiters and after a "Participant X:" speaker prefix. Both are
+# forgeable from the chat if they are passed through verbatim: a member who
+# types "</transcript>" ends the transcript early and everything after it reads
+# to the model as instructions rather than as data. Neutralising the two
+# structural tokens here means the prompt builder cannot be tricked by content.
+#
+# The rewrite is visible, and it rewrites the *word* rather than hiding it
+# behind an invisible character. A zero-width space would look like it worked
+# and would not: egress._normalise strips zero-width characters before matching,
+# so a forged "Participant Z" would reassemble inside the firewall and trip the
+# unknown-label rule -- turning a prompt-injection attempt into a pipeline stall.
+_ANGLE = re.compile(r"[<>]")
+_NEWLINES = re.compile(r"[\r\n  ]+")
+_SPEAKER = re.compile(r"(?<!\w)Participant(\s+)([A-Za-z]{1,3})(?!\w)")
+
 
 @dataclass
 class TranscriptStats:
     included: int = 0
     dropped_opted_out: int = 0
+    dropped_quote_opted_out: int = 0
     dropped_sensitive: int = 0
     dropped_empty: int = 0
     kept_urls: int = 0
@@ -54,6 +72,38 @@ class Builder:
         if not aci:
             return UNKNOWN_LABEL
         return self.pseudonyms.label(aci)
+
+    def _defang(self, text: str) -> str:
+        """Defuse prompt-structure tokens in attacker-controlled message text.
+
+        Runs *after* mention substitution, so it has to tell a label this module
+        wrote from one a member typed. It does that by checking the label
+        against the ones actually allocated: `Participant A` produced by a real
+        mention is allocated and survives, `Participant Z` typed by a member is
+        not and becomes `member Z`.
+
+        Rewriting every occurrence instead -- the first version of this -- broke
+        mentions, which is what the transcript tests caught. Leaving them all
+        alone lets a member both forge a speaker turn and, with an unallocated
+        letter, trip the firewall's unknown-label rule on every window.
+
+        What this does not stop: a member typing a label that *is* allocated,
+        impersonating someone inline. They cannot tell which label belongs to
+        whom, and the newline collapse below stops it being read as a turn, so
+        it degrades to ordinary quoting rather than forgery.
+        """
+        known = self.pseudonyms.known_labels()
+        text = _ANGLE.sub(lambda m: "(" if m.group() == "<" else ")", text)
+        # One message is one transcript line. A body-internal newline is the
+        # other half of the forgery: without it, "\nParticipant Z: ..." reads
+        # as a new turn rather than as text inside this one.
+        text = _NEWLINES.sub("  ", text)
+        return _SPEAKER.sub(
+            lambda m: m.group(0)
+            if f"Participant {m.group(2)}" in known
+            else f"member{m.group(1)}{m.group(2)}",
+            text,
+        )
 
     def line(self, msg: ParsedMessage) -> str | None:
         """One transcript line, or None if the message must not be included."""
@@ -88,12 +138,18 @@ class Builder:
 
         speaker = self._label(msg.source)
         prefix = ""
-        if msg.quote_text:
+        # An opt-out has to cover being quoted, or it is not an opt-out. Someone
+        # who replies to a member who has opted out would otherwise carry that
+        # member's words through this function verbatim -- the sender check at
+        # the top only sees the *replier*. PRIVACY.md promises this explicitly.
+        if msg.quote_text and not is_opted_out(self.roster, msg.quote_author):
             quoted = self.redactor.redact(msg.quote_text)
             if not quoted.dropped and quoted.text.strip():
-                prefix = f"(replying to: {quoted.text.strip()[:120]}) "
+                prefix = f"(replying to: {self._defang(quoted.text.strip()[:120])}) "
+        elif msg.quote_text:
+            self.stats.dropped_quote_opted_out += 1
         suffix = f" [+{msg.attachment_count} attachment(s)]" if msg.attachment_count else ""
-        return f"{speaker}: {prefix}{text}{suffix}"
+        return f"{speaker}: {prefix}{self._defang(text)}{suffix}"
 
     def build(self, messages: list[ParsedMessage]) -> str:
         """Render a batch. Timestamps are already coarsened by the parser."""

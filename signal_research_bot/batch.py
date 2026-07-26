@@ -86,17 +86,45 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         "transcript": builder.stats.as_dict(),
         "cheap_attempted": 0, "cheap_resolved": 0, "escalated": 0,
         "written": 0, "failed": 0, "ungrounded_dropped": 0, "refusals": 0,
+        "unsourced_dropped": 0,
     }
 
     # --- stage 1 + 2 ---------------------------------------------------------
-    extracted, _ = client.send_json(**stages.extract(transcript, cfg.research_domain))
-    candidates = extracted.get("tasks") or []
-    if not candidates:
-        _finish(cache, window_id, messages, cfg, client, stats, vault)
-        return 0
+    #
+    # These two calls carry the whole window, so a firewall block here fails the
+    # window rather than one task. It must still be *consumed*: the messages stay
+    # pending on a crash by design, but a payload the firewall rejects would be
+    # rebuilt identically on the next run and rejected again, wedging every
+    # future window behind it. One redaction miss would have stopped the bot
+    # permanently and silently. The content is quarantined for review instead.
+    try:
+        extracted, _ = client.send_json(**stages.extract(transcript, cfg.research_domain))
+        candidates = extracted.get("tasks") or []
+        if not candidates:
+            _finish(cache, window_id, messages, cfg, client, stats, vault)
+            return 0
 
-    digest = vault.digest() if vault else "(archive is empty)"
-    triaged, _ = client.send_json(**stages.triage(candidates, digest, cfg.research_domain))
+        digest = vault.digest() if vault else "(archive is empty)"
+        triaged, _ = client.send_json(
+            **stages.triage(candidates, digest, cfg.research_domain)
+        )
+    except EgressViolation as exc:
+        stats["failed"] += 1
+        stats["window_blocked"] = exc.rule
+        log.error(
+            "egress blocked the window; quarantined and skipped",
+            extra={"rule": exc.rule, "window": window_id},
+        )
+        _finish(cache, window_id, messages, cfg, client, stats, vault)
+        return 1
+    except (Refusal, ValueError) as exc:
+        # A refusal or unparseable structured output on stage 1/2 is transient
+        # in a way a firewall block is not, so the window is NOT consumed here.
+        stats["failed"] += 1
+        log.error("window failed before triage", extra={"error": type(exc).__name__})
+        record_run(cfg.metrics_path, stats)
+        cache.close()
+        return 1
 
     gated = apply_gate(
         triaged.get("tasks") or [],
@@ -106,6 +134,17 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
     stats.update(gated.counts)
     if gated.deferred_over_cap:
         # Never silent: a truncated list reads exactly like "nothing was missed".
+        #
+        # The count alone was not enough. The window is marked processed at the
+        # end of this run, so a task deferred by the cap was never seen again --
+        # the only record that a question existed was an integer in a log line.
+        # The questions themselves go into metrics.jsonl, which is the file the
+        # operator already reviews, so a deferred task can be re-raised rather
+        # than quietly lost. They are post-redaction and post-triage, so they
+        # carry no more identity than the transcript already did.
+        stats["deferred_questions"] = [
+            t.get("question", "") for t in gated.deferred_over_cap
+        ]
         log.info("tasks deferred by the cap", extra={"count": len(gated.deferred_over_cap)})
 
     # --- stage 2.5 / 3 / 3b, per task ---------------------------------------
@@ -159,6 +198,17 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
                 ]
                 log.warning("dropped ungrounded citations", extra={"count": len(bad)})
 
+            # notify.py tells the group "every answer carries its sources". An
+            # entry whose evidence list is empty -- because the search returned
+            # nothing, or because every citation was ungrounded and stripped --
+            # makes that false, and the renderer has a polite string for exactly
+            # that case which reads like a finding rather than a failure. Better
+            # to write nothing and count it.
+            if not (record.get("evidence") or []):
+                stats["unsourced_dropped"] = stats.get("unsourced_dropped", 0) + 1
+                log.warning("no grounded sources; entry not written")
+                continue
+
             record.setdefault("title", title_for(question, month))
             stem, markdown = render(record, first_raised=today, last_verified=today)
             if vault:
@@ -177,14 +227,20 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         except Refusal as exc:
             stats["refusals"] += 1
             log.warning("model refused a task", extra={"category": exc.category})
+            stats.setdefault("unfinished_questions", []).append(question)
         except EgressViolation as exc:
             # Already quarantined. Counted, not retried: the same input would
             # violate again.
             stats["failed"] += 1
             log.error("egress blocked a task", extra={"rule": exc.rule})
+            stats.setdefault("unfinished_questions", []).append(question)
         except Exception as exc:  # noqa: BLE001 - one bad task must not end the window
             stats["failed"] += 1
             log.exception("task failed", extra={"error": type(exc).__name__})
+            # Same reasoning as deferred_questions above: the window is consumed
+            # at the end of this run, so without the question itself a failed
+            # task leaves nothing to retry from.
+            stats.setdefault("unfinished_questions", []).append(question)
 
     _finish(cache, window_id, messages, cfg, client, stats, vault, written_entries)
     return 0

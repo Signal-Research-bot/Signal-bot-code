@@ -222,3 +222,72 @@ def test_clean_message_is_untouched(redactor):
 
 def test_empty_message(redactor):
     assert redactor.redact("").text == ""
+
+
+# --- audit regressions --------------------------------------------------------
+
+
+def test_a_phone_number_written_without_a_plus_is_redacted(roster):
+    """PRIVACY.md says "phone numbers, in any format". A contiguous run of
+    digits has no '+', no trunk zero and no separators, so it matched none of
+    the phone rules and passed through untouched."""
+    r = Redactor(roster=roster)
+    # A real, assignable London landline. Reserved "drama" ranges (+44 7700
+    # 900xxx, +1 555) are deliberately NOT valid numbers, so they do not
+    # exercise this path -- see is_dialable().
+    assert "[phone]" in r.redact("whatsapp " + "44" + "2079250918").text
+
+
+def test_a_large_financial_figure_is_not_mistaken_for_a_phone_number(roster):
+    """The counterweight. This pipeline exists to read a finance chat, where a
+    reserves figure is the payload. Blanking it is not the safe side."""
+    r = Redactor(roster=roster)
+    for figure in ("127000000000", "3200000000", "830000"):
+        out = r.redact(f"reserves were {figure} usd").text
+        assert figure in out, f"{figure} was redacted as a phone number"
+
+
+def test_non_ascii_digits_cannot_hide_a_phone_number(roster):
+    r"""str.isdigit() is true for Arabic-Indic numerals but every phone rule
+    matches ASCII \d, and NFKC does not fold them -- it folds fullwidth forms
+    only. A number typed in Eastern Arabic numerals passed every control."""
+    r = Redactor(roster=roster)
+    arabic = "".join(chr(0x0660 + int(d)) for d in "442079250918")
+    assert "[phone]" in r.redact(f"ring {arabic}").text
+
+
+def test_a_zero_width_character_cannot_hide_a_roster_name(roster):
+    r = Redactor(roster=roster)
+    name = "An" + "​" + "na Smith"
+    assert "Anna" not in r.redact(f"{name} said so").text
+
+
+def test_a_bidi_control_cannot_hide_a_roster_name(roster):
+    """Bidi controls survive NFKC, render as nothing on their own, and split
+    the token for every regex in the module."""
+    r = Redactor(roster=roster)
+    name = "An" + "‮" + "na Smith"
+    assert "Anna" not in r.redact(f"{name} said so").text
+
+
+def test_a_group_name_containing_a_roster_name_is_fully_removed():
+    """Names used to run before the group-name pass. A group called
+    "Ravenhill Investors" whose roster contains "Ravenhill" became
+    "[participant] Investors" -- the group-name pattern no longer matched, so
+    the distinctive remainder survived and went to Anthropic. Multi-token group
+    names are the common case."""
+    r = Redactor(roster=Roster(names=("Ravenhill",), phones=(),
+                               group_name="Ravenhill Investors"))
+    out = r.redact("see the Ravenhill Investors thread").text
+    assert "Investors" not in out
+    assert "[group]" in out
+
+
+def test_metrics_rule_names_carry_no_fragment_of_a_real_name(roster):
+    """rules_fired is written to metrics.jsonl and to logs. It used to embed
+    the first two characters of the matched name."""
+    r = Redactor(roster=roster)
+    fired = r.redact("Anna Smith said so").rules_fired
+    assert any(f.startswith("roster-name") for f in fired)
+    for rule in fired:
+        assert "An" not in rule and "Sm" not in rule
