@@ -37,10 +37,11 @@ ENVELOPE = REPO_ROOT / "signal_research_bot" / "envelope.py"
 RENDER = REPO_ROOT / "signal_research_bot" / "kb" / "render.py"
 IDENTITY = REPO_ROOT / "signal_research_bot" / "identity.py"
 REDACT = REPO_ROOT / "signal_research_bot" / "redact.py"
+RECEIVER = REPO_ROOT / "signal_research_bot" / "receiver.py"
 SUITE = (
     "tests/test_egress.py tests/test_client.py tests/test_transcript.py "
     "tests/test_envelope.py tests/test_redact.py tests/test_kb.py "
-    "tests/test_batch.py tests/test_identity.py"
+    "tests/test_batch.py tests/test_identity.py tests/test_receiver.py"
 )
 
 
@@ -220,6 +221,12 @@ MUTATIONS: tuple[Mutation, ...] = (
         "            if rate > AUTO_HANDLE_MAX_HIT_RATE:",
         "            if False:",
         IDENTITY,
+    ),
+    Mutation(
+        "display names harvested before the group filter",
+        "        self._observe_handle(env)",
+        "        pass  # observation moved earlier",
+        RECEIVER,
     ),
     Mutation(
         "every observed handle is rejected (learning does nothing)",

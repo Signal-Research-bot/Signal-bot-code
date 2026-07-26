@@ -189,7 +189,6 @@ class Receiver:
         if env is None:
             return
         self.stats.envelopes += 1
-        self._observe_handle(env)
 
         try:
             msg = parse(env, self.group_id)
@@ -202,6 +201,21 @@ class Receiver:
         if msg is None:
             self.stats.other_group += 1
             return
+
+        # AFTER the group filter, deliberately.
+        #
+        # This ran before it for its first eleven minutes in production, and in
+        # that time recorded 41 display names for an eight-person group -- because
+        # signal-cli delivers envelopes for EVERY conversation the linked account
+        # receives, and the group check is what discards the rest. It was
+        # harvesting the names of people with no connection to this project into
+        # a file on disk, and feeding them to the deny-list, where an unrelated
+        # person's name becomes a redaction rule over the research text.
+        #
+        # `parse` returning non-None is the only proof an envelope belongs to the
+        # target group, so nothing identity-bearing may be read out of an
+        # envelope before this point.
+        self._observe_handle(env)
 
         # Case-insensitive: this marker is documented to members as a
         # per-message opt-out, and someone typing "[Research-Bot]" plainly meant

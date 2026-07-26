@@ -365,3 +365,34 @@ def test_observing_handles_is_off_unless_a_path_is_given(tmp_path):
     r._handle(frame)          # must not raise
     assert len(cache.pending()) == 1
     cache.close()
+
+
+def test_display_names_are_only_recorded_for_the_target_group(tmp_path):
+    """_observe_handle ran BEFORE the group filter for its first eleven minutes
+    in production and recorded 41 display names for an eight-person group.
+
+    signal-cli delivers envelopes for every conversation the linked account
+    receives; the group check is what discards the rest. So it was harvesting
+    names of people with no connection to this project onto disk, and feeding
+    them to the deny-list where an unrelated person's name becomes a redaction
+    rule over the research text.
+    """
+    cache = Cache.open(tmp_path / "c.db", None, allow_plaintext=True)
+    out = tmp_path / "observed-handles.json"
+    r = Receiver("h", 1, GROUP, cache, None, observed_handles_path=out)
+
+    # An envelope from a DIFFERENT group must leave no trace.
+    other = notification("hello from elsewhere")
+    other["params"]["envelope"]["dataMessage"]["groupInfo"]["groupId"] = "c29tZS1vdGhlci1ncm91cA=="
+    other["params"]["envelope"]["sourceName"] = "someone_unrelated"
+    r._handle(other)
+    assert r.stats.other_group == 1
+    assert not out.exists(), "recorded a name from outside the target group"
+
+    # One from the target group is recorded as normal.
+    mine = notification("hello", ts=TS + 60_000)
+    mine["params"]["envelope"]["sourceName"] = "zeropoint_x"
+    r._handle(mine)
+    recorded = json.loads(out.read_text(encoding="utf-8"))["observed"]
+    assert recorded == ["zeropoint_x"]
+    cache.close()
