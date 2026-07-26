@@ -66,9 +66,15 @@ services:
       # fetch (and acknowledge) messages with nothing on the other end to
       # persist them. That is silent, permanent message loss.
       #
-      # /proc/net/tcp is read-only and needs no extra package. 0x1D9F == 7583,
+      # /proc/net is read-only and needs no extra package. 0x1D9F == 7583,
       # state 0A == TCP_LISTEN.
-      test: ["CMD-SHELL", "grep -qi ':1D9F .* 0A ' /proc/net/tcp || exit 1"]
+      #
+      # BOTH tcp and tcp6 are checked, and this is not belt-and-braces: the
+      # GraalVM binary binds the IPv6 wildcard even though the daemon is told
+      # 0.0.0.0, so the listening socket appears ONLY in /proc/net/tcp6. A
+      # first version of this check read /proc/net/tcp alone and reported the
+      # service unhealthy against the real container every time.
+      test: ["CMD-SHELL", "awk '$4==\"0A\" && $2 ~ /:1D9F$/ {f=1} END {exit !f}' /proc/net/tcp /proc/net/tcp6"]
       interval: 60s
       timeout: 5s
       retries: 3
