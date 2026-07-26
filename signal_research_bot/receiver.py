@@ -31,10 +31,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import socket
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .cache import Cache
@@ -120,11 +122,65 @@ class Receiver:
     # and filtered later at transcript-build time. That distinction is the
     # difference between the sentence being true and being nearly true.
     roster: Roster | None = None
+    # Where to record the display names Signal attaches to incoming messages.
+    # An operator aid, not a control -- see _observe_handle.
+    observed_handles_path: Path | None = None
     stats: ReceiverStats = field(default_factory=ReceiverStats)
     _stop: bool = False
+    _observed: set[str] = field(default_factory=set)
 
     def stop(self) -> None:
         self._stop = True
+
+    def _observe_handle(self, envelope: dict[str, Any]) -> None:
+        """Record the display name Signal attached to a sender.
+
+        This answers a practical problem: the operator of a pseudonymous group
+        cannot fill in the redaction deny-list, because they do not know what
+        anyone is called. Signal already tells us -- `sourceName` rides along on
+        envelopes the receiver is holding a connection for anyway, so this costs
+        no extra RPC call and none of the message-loss risk that opening a
+        second connection to the daemon would carry.
+
+        Deliberately an AID, NOT A CONTROL. Nothing reads this file
+        automatically and redaction never consults it. A name harvested off the
+        network becoming a live redaction rule with nobody looking is the kind
+        of quiet coupling that is impossible to reason about later -- and it
+        would also let anyone who can set a profile name inject entries into the
+        deny-list. The operator copies what they want into var/roster.json.
+
+        Stores the names only, never a name-to-ACI mapping. The list is all that
+        is needed to populate `handles`, and the mapping would be a strictly
+        more sensitive file for no extra benefit.
+        """
+        if self.observed_handles_path is None:
+            return
+        name = (envelope.get("sourceName") or "").strip()
+        if not name or name in self._observed:
+            return
+        self._observed.add(name)
+        try:
+            path = self.observed_handles_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "_README": "Display names seen on incoming messages. An "
+                        "aid for filling in 'handles' in roster.json -- nothing "
+                        "reads this file automatically. Local and gitignored.",
+                        "observed": sorted(self._observed),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError as exc:
+            # Never fatal: this is a convenience, and the receiver's one job is
+            # to lose no messages.
+            log.warning("could not record observed handle", extra={"error": str(exc)})
 
     # -- one connection ------------------------------------------------------
 
@@ -133,6 +189,7 @@ class Receiver:
         if env is None:
             return
         self.stats.envelopes += 1
+        self._observe_handle(env)
 
         try:
             msg = parse(env, self.group_id)

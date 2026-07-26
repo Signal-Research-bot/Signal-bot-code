@@ -6,11 +6,22 @@ put in the roster), and NER, if present, is a recall supplement that is never
 relied upon. Published PERSON F1 for general-purpose NER sits around 0.62-0.69,
 which is nowhere near good enough to be a privacy control on its own.
 
-Fails closed in two ways:
+Two failure modes, deliberately different:
 
 * Missing `phonenumbers` is a hard error, not a silent downgrade to regex.
-* A missing or empty roster is a hard error. An empty deny-list redacts nothing
-  while reporting success, which is the worst possible failure mode.
+  `egress.py` imports `is_dialable` from this module, so losing the library
+  would silently disarm a firewall rule as well as this one.
+* An empty roster **warns and continues**. It used to be a hard error, on the
+  reasoning that an empty deny-list redacts nothing while reporting success.
+  That reasoning assumed members go by real names the operator could type in.
+  In a group that is already pseudonymous there is nothing to type, so the
+  hard error meant the tool never ran at all -- blocking everything while
+  protecting nothing. The roster-independent shape rules in `egress.py` still
+  apply, and `Roster.coverage()` is recorded per run so a bare roster cannot
+  be mistaken for a covered one.
+
+Real names and chat handles are enforced in different places, and that split is
+load-bearing: see `Roster.handles`.
 
 A judgement call worth knowing about
 ------------------------------------
@@ -27,12 +38,15 @@ IBANs, UUIDs and roster names have no such exemption -- they are always removed.
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable
 
 from .identity import Roster
+
+log = logging.getLogger(__name__)
 
 PLACEHOLDER_NAME = "[participant]"
 PLACEHOLDER_PHONE = "[phone]"
@@ -223,11 +237,30 @@ class Redactor:
                 "phone detection, which would silently weaken redaction."
             ) from exc
 
-        variants = self.roster.name_variants()
+        variants = self.roster.redaction_variants()
         if not variants and not self.roster.phones:
-            raise RedactionUnavailable(
-                "roster is empty. An empty deny-list redacts nothing while "
-                "reporting success -- refusing to run."
+            # Degrades loudly; does NOT refuse.
+            #
+            # This used to raise. That was correct for a group whose members go
+            # by their real names, and wrong for one that is already
+            # pseudonymous: there is nothing for the operator to put in the
+            # file, so the batch exited 2 on every window and the tool did not
+            # run at all. A control that blocks everything while protecting
+            # nothing is not the safe side of this trade.
+            #
+            # What survives an empty deny-list is not nothing. The egress
+            # firewall's shape rules are roster-independent and fire in both
+            # directions: E.164 and bare dialable numbers, emails, and UUIDs in
+            # both dashed and compact form. Those cover the identifiers that
+            # actually deanonymise a person. What is lost is names and handles
+            # -- a real degradation, but a degradation and not a hole.
+            #
+            # Roster.coverage() is recorded per run so a window with nothing
+            # configured cannot look identical to a fully covered one.
+            log.warning(
+                "roster has no names, handles or phones: name redaction is "
+                "INACTIVE for this run. Identifier shape rules still apply. "
+                "Add chat handles to var/roster.json to close this."
             )
         # Longest first so 'Anna Smith' is consumed before 'Anna'.
         for v in sorted(variants, key=len, reverse=True):

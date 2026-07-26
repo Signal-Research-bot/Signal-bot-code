@@ -47,7 +47,12 @@ def main() -> int:
             extra={"path": cfg.roster_path.name},
         )
 
-    receiver = Receiver(cfg.signal_host, cfg.signal_port, cfg.group_id, cache, roster)
+    receiver = Receiver(
+        cfg.signal_host, cfg.signal_port, cfg.group_id, cache, roster,
+        # Lets the operator discover what members are called without knowing
+        # anyone's real name, and without a second connection to the daemon.
+        observed_handles_path=cfg.roster_path.parent / "observed-handles.json",
+    )
 
     def shutdown(signum, _frame):
         # Stop after the current frame so a message in flight is written first.

@@ -6,6 +6,7 @@ properties that matter most here are the ones about not damaging it.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -277,3 +278,83 @@ def test_frontmatter_escapes_on_its_own_without_help_from_render():
     keys = [line.split(":")[0] for line in block.strip().split("\n")[1:-1]]
     assert "malicious_key" not in keys
     assert keys.count("tags") == 1
+
+
+# --- keeping participants out of the research itself -------------------------
+
+
+def test_a_speaker_label_never_reaches_a_page():
+    """The labels are STABLE for the life of the archive, so an attributed claim
+    in a permanent, member-readable page identifies someone to the eight people
+    best placed to work out who. The egress firewall cannot help: it ALLOWS
+    allocated labels by design, and a test asserts that it does."""
+    rec = record(
+        question="Was Participant B right that the reserves are audited?",
+        answer="Participant A disputed this; Participant B was correct.",
+        headline="Participant B was right",
+    )
+    _, md = render(rec, first_raised="2026-07-24", last_verified="2026-07-25")
+    # Assert on the LABEL shape, not the bare word: the static Provenance
+    # sentence legitimately reads "Participants are pseudonymised", and a test
+    # that banned the word outright would be testing the boilerplate.
+    assert not re.search(r"Participants?\s+[A-Z]\b", md)
+    assert "a group member" in md
+
+
+def test_a_speaker_label_never_reaches_the_filename():
+    """slug(title) becomes the filename, which is itself a published artefact."""
+    stem, _ = render(
+        record(title="Research - Participant C on reserves - 2026-07"),
+        first_raised="2026-07-24", last_verified="2026-07-25",
+    )
+    assert "Participant" not in stem
+
+
+def test_an_at_handle_is_stripped_from_a_page():
+    rec = record(answer="As @zeropoint_x noted, the attestation is not an audit.")
+    _, md = render(rec, first_raised="2026-07-24", last_verified="2026-07-25")
+    assert "zeropoint_x" not in md
+
+
+def test_depersonalising_does_not_block_the_write():
+    """Strips, never refuses. The operator ranked a working tool above
+    completeness of redaction, so this must degrade the text and carry on."""
+    stem, md = render(
+        record(question="Participant A asked about reserves"),
+        first_raised="2026-07-24", last_verified="2026-07-25",
+    )
+    assert stem and "## Question" in md
+
+
+def test_a_handle_shaped_tag_is_dropped():
+    """An Obsidian tag is a clickable index across the vault, so a handle here
+    would build a browsable page-set per person."""
+    _, md = render(
+        record(tags=["reserves", "zeropoint_x", "@someone", "Participant A"]),
+        first_raised="2026-07-24", last_verified="2026-07-25",
+    )
+    tag_line = [ln for ln in md.splitlines() if ln.startswith("tags:")][0]
+    assert "reserves" in tag_line
+    assert "zeropoint_x" not in tag_line and "someone" not in tag_line
+
+
+def test_speaker_labels_are_stripped_from_list_and_nested_fields():
+    """Mutation testing caught this: every earlier test used a top-level string
+    field, so removing list recursion from depersonalise() changed nothing and
+    the suite stayed green.
+
+    contradictions, open_questions and evidence[].quote are free text too, and
+    a contradiction is exactly where "Participant B disagreed" gets written.
+    """
+    rec = record(
+        contradictions=["Participant A says the reserves are audited"],
+        open_questions=["What did Participant C mean by full backing?"],
+        evidence=[{
+            "url": "https://example.gov/f.htm",
+            "quote": "Participant B linked this",
+            "confidence": "primary",
+        }],
+    )
+    _, md = render(rec, first_raised="2026-07-24", last_verified="2026-07-25")
+    assert not re.search(r"Participants?\s+[A-Z]\b", md)
+    assert md.count("a group member") == 3

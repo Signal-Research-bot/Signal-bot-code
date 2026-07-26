@@ -135,6 +135,19 @@ class Policy:
             roster=roster,
             allowed_labels=frozenset(allowed_labels),
             group_id=group_id,
+            # name_variants(), NOT redaction_variants(): chat handles are
+            # deliberately excluded from the firewall.
+            #
+            # This module matches every variant, case-insensitively, against the
+            # serialized request -- which contains this bot's own system
+            # prompts. A member whose handle is an ordinary word ("gate",
+            # "money", "audit") therefore matches the prompt text itself, and
+            # because batch.py consumes a firewall-blocked window rather than
+            # retrying it, every window would fail forever. "audit" collides
+            # with both the extract and triage prompts as shipped.
+            #
+            # Handles are enforced in redact.py instead, where a miss costs one
+            # un-redacted pseudonym rather than the whole tool.
             _name_variants=tuple(
                 sorted(roster.name_variants(), key=len, reverse=True)
             ),

@@ -1,8 +1,17 @@
 """Append-only run metrics.
 
-Counts and token usage only -- never message content, never a question, never
-a title. This file is for answering "is the gate set right and what is this
-costing", and it should be safe to paste into an issue.
+Mostly counts and token usage. This file answers "is the gate set right, and
+what is this costing".
+
+**It is NOT safe to paste into an issue.** It used to say it was, and that held
+until `deferred_questions` and `unfinished_questions` were added so a task
+dropped by the cap or lost to a failure could be re-raised rather than vanish.
+Those are model-restated questions derived from the conversation -- exactly the
+content this file had promised to exclude. Keeping them is the better trade, a
+silently discarded question being worse, but the promise has to change with the
+data rather than outlive it.
+
+The file is gitignored and local. Read it; do not share it.
 
 The two numbers that matter most, per .claude/skills/claude-cascade, are
 tasks-per-window and searches-per-task: their product is essentially the whole

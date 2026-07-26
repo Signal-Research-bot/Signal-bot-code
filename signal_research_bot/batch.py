@@ -27,7 +27,7 @@ from .config import Config, ConfigError
 from .egress import EgressViolation, Policy, check_outbound
 from .gate import allowed_urls, apply_gate, reject_ungrounded, should_escalate
 from .identity import KeyUnavailable, PseudonymStore, Roster, load_or_create_key
-from .kb.render import render, title_for
+from .kb.render import depersonalise, render, title_for
 from .kb.writer import VaultError, VaultWriter, git_commit
 from .logging_setup import configure
 from .metrics import record_run
@@ -87,6 +87,10 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         "cheap_attempted": 0, "cheap_resolved": 0, "escalated": 0,
         "written": 0, "failed": 0, "ungrounded_dropped": 0, "refusals": 0,
         "unsourced_dropped": 0,
+        # What the roster actually covered. Recorded because an empty roster no
+        # longer refuses to run: without this, a window with no deny-list at all
+        # would look identical in the metrics to a fully covered one.
+        "roster_coverage": roster.coverage(),
     }
 
     # --- stage 1 + 2 ---------------------------------------------------------
@@ -214,11 +218,15 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
             if vault:
                 vault.write(stem, markdown)
                 stats["written"] += 1
-                written_entries.append({
+                # Depersonalised again here rather than reusing the rendered
+                # record: this text is broadcast back into the Signal group, and
+                # the group is the one audience that can map a stable label onto
+                # a real person immediately.
+                written_entries.append(depersonalise({
                     "title": record.get("title", ""),
                     "finding": record.get("finding", "unestablished"),
                     "headline": record.get("headline", ""),
-                })
+                }))
                 stats.setdefault("findings", {})
                 stats["findings"][record.get("finding", "unestablished")] = (
                     stats["findings"].get(record.get("finding", "unestablished"), 0) + 1

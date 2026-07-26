@@ -199,7 +199,19 @@ KB_RECORD = _obj(
             "description": "What remains unestablished. Empty list means you "
             "looked and found none.",
         },
-        "tags": {"type": "array", "items": {"type": "string"}},
+        # The one required field that had neither a description nor an enum,
+        # and render.py merges it straight into Obsidian frontmatter -- where a
+        # tag is a clickable index across the whole vault. A handle landing here
+        # would build a browsable page-set per person. The description is static
+        # (nothing chat-derived may appear in a schema, which is cached
+        # server-side) and render.py filters the shape as a backstop.
+        "tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Short lowercase topical slugs about the SUBJECT "
+            "MATTER, e.g. 'reserves', 'attestation'. Never a person, a "
+            "username, a speaker label, or anything about who was talking.",
+        },
     },
     [
         "title", "question", "answer", "confidence", "research_status",

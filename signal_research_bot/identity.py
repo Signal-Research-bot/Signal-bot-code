@@ -153,7 +153,24 @@ class Roster:
     NER cannot make up for a name that is missing here.
     """
 
+    # Real names, if any are known. These are enforced in BOTH redaction and the
+    # egress firewall, because a real name leaving the machine is worth failing
+    # a window over.
     names: tuple[str, ...] = ()
+    # Chat handles -- the pseudonymous usernames members actually go by. These
+    # feed redaction ONLY, and deliberately never reach the firewall.
+    #
+    # The reason is not stylistic. The firewall matches every roster variant,
+    # case-insensitively, against the SERIALIZED REQUEST -- which includes this
+    # bot's own system prompts. A member calling themselves "audit" therefore
+    # matches the extract and triage prompts, and since a blocked window is
+    # consumed rather than retried, every window would fail forever. Verified:
+    # "gate", "money" and "audit" all collide with the shipped prompts.
+    #
+    # So handles are enforced where the failure is graceful. Missing a handle in
+    # redaction costs one un-redacted pseudonym in a request; putting handles in
+    # the firewall costs the entire tool.
+    handles: tuple[str, ...] = ()
     phones: tuple[str, ...] = ()
     opted_out: frozenset[str] = frozenset()   # ACIs whose messages are dropped
     group_name: str | None = None
@@ -168,6 +185,7 @@ class Roster:
         raw = json.loads(path.read_text(encoding="utf-8"))
         roster = cls(
             names=tuple(raw.get("names") or ()),
+            handles=tuple(raw.get("handles") or ()),
             phones=tuple(raw.get("phones") or ()),
             opted_out=frozenset(raw.get("opted_out") or ()),
             group_name=raw.get("group_name"),
@@ -195,10 +213,10 @@ class Roster:
                 )
 
     def name_variants(self) -> set[str]:
-        """Every surface form of a roster name that must be caught.
+        """Surface forms of the REAL names. Enforced by redaction and firewall.
 
-        Presidio's deny_list is case-sensitive, exact-token, and has no notion
-        of possessives, so the variants have to be enumerated here rather than
+        Matching is case-sensitive exact-token wherever it is applied, with no
+        notion of possessives, so the variants are enumerated here rather than
         assumed. This is a floor, not a ceiling: nicknames and misspellings
         belong in the roster file itself.
         """
@@ -212,6 +230,45 @@ class Roster:
                     continue      # initials generate too many false positives
                 out |= {part, f"{part}'s", f"{part}s'", f"{part}’s"}
         return out
+
+    def handle_variants(self) -> set[str]:
+        """Surface forms of the chat handles. Redaction only -- never the firewall.
+
+        Deliberately does NOT split on whitespace, unlike name_variants. A real
+        name splits usefully: "Anna Smith" should also catch "Anna". A handle
+        does not: splitting "Big Whale" injects the bare token "whale" into the
+        deny-list of an archive about crypto markets, and every discussion of a
+        large holder would come out redacted. A handle is a token, so it is
+        matched as one.
+
+        The 3-character floor is higher than name_variants' 2 for the same
+        reason -- a two-character handle would shred ordinary prose.
+        """
+        out: set[str] = set()
+        for handle in self.handles:
+            h = handle.strip().lstrip("@")
+            if len(h) < 3:
+                continue
+            out |= {h, f"{h}'s", f"{h}’s"}
+        return out
+
+    def redaction_variants(self) -> set[str]:
+        """Everything redaction should strip: real names AND handles."""
+        return self.name_variants() | self.handle_variants()
+
+    def coverage(self) -> dict[str, int]:
+        """What this roster actually covers, for honest run reporting.
+
+        Recorded per run so a window with nothing configured cannot look
+        identical to a fully covered one in metrics.jsonl.
+        """
+        return {
+            "names": len(self.names),
+            "handles": len(self.handles),
+            "phones": len(self.phones),
+            "opted_out": len(self.opted_out),
+            "group_name": 1 if self.group_name else 0,
+        }
 
 
 @dataclass

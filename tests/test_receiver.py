@@ -323,3 +323,45 @@ def test_the_opt_out_marker_is_case_insensitive(tmp_path):
     assert r.stats.dropped_bot_echo == 1
     assert cache.pending() == []
     cache.close()
+
+
+def test_display_names_are_recorded_for_the_operator(tmp_path):
+    """The answer to "how do I fill in the roster for a group whose members I
+    cannot name". Signal attaches sourceName to envelopes the receiver is
+    already holding a connection for, so this costs no extra RPC call."""
+    cache = Cache.open(tmp_path / "c.db", None, allow_plaintext=True)
+    out = tmp_path / "observed-handles.json"
+    r = Receiver("h", 1, GROUP, cache, None, observed_handles_path=out)
+
+    frame = notification("hello")
+    frame["params"]["envelope"]["sourceName"] = "zeropoint_x"
+    r._handle(frame)
+
+    recorded = json.loads(out.read_text(encoding="utf-8"))
+    assert recorded["observed"] == ["zeropoint_x"]
+    cache.close()
+
+
+def test_observed_handles_never_record_a_name_to_aci_mapping(tmp_path):
+    """The list is all that is needed to populate `handles`; the mapping would
+    be a strictly more sensitive file for no extra benefit."""
+    cache = Cache.open(tmp_path / "c.db", None, allow_plaintext=True)
+    out = tmp_path / "observed-handles.json"
+    r = Receiver("h", 1, GROUP, cache, None, observed_handles_path=out)
+
+    frame = notification("hello")
+    frame["params"]["envelope"]["sourceName"] = "zeropoint_x"
+    r._handle(frame)
+
+    assert ALICE not in out.read_text(encoding="utf-8")
+    cache.close()
+
+
+def test_observing_handles_is_off_unless_a_path_is_given(tmp_path):
+    cache = Cache.open(tmp_path / "c.db", None, allow_plaintext=True)
+    r = Receiver("h", 1, GROUP, cache)
+    frame = notification("hello")
+    frame["params"]["envelope"]["sourceName"] = "zeropoint_x"
+    r._handle(frame)          # must not raise
+    assert len(cache.pending()) == 1
+    cache.close()

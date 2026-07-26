@@ -392,3 +392,41 @@ def test_a_sha256_and_an_eth_address_are_not_mistaken_for_an_aci(policy):
     check_outbound(
         {"messages": [{"role": "user", "content": "addr 0x" + "ab" * 20}]}, policy
     )
+
+
+def test_chat_handles_are_not_compiled_into_the_firewall():
+    """The design decision this whole rework turns on.
+
+    check_outbound serializes the ENTIRE request, system prompts included, and
+    word-boundary matches every roster variant case-insensitively. A member
+    whose handle is an ordinary word therefore matches the bot's own prompt
+    text -- and because batch.py CONSUMES a firewall-blocked window rather than
+    retrying it, every window would fail forever.
+
+    Verified against the shipped prompts: "audit" collides with both extract and
+    triage. So handles are enforced in redact.py, where a miss costs one
+    un-redacted pseudonym instead of the entire tool.
+    """
+    from signal_research_bot.claude import stages
+
+    roster = Roster(handles=("audit", "gate", "money"), group_name="Ravenhill")
+    policy = Policy.build(roster, {"Participant A"}, GROUP_ID)
+    assert policy._name_variants == (), "handles must not reach the firewall"
+
+    for request in (
+        stages.extract("Participant A: hello", "crypto"),
+        stages.cheap_research("q", "r"),
+    ):
+        check_outbound(request, policy)
+
+
+def test_real_names_ARE_compiled_into_the_firewall():
+    """The counterweight. Handles are excluded because they are ordinary words;
+    a real name is still worth failing a window over."""
+    roster = Roster(names=("Anna Smith",), group_name="Ravenhill")
+    policy = Policy.build(roster, {"Participant A"}, GROUP_ID)
+    assert policy._name_variants, "real names must still be enforced"
+    with pytest.raises(EgressViolation):
+        check_outbound(
+            {"messages": [{"role": "user", "content": "Anna Smith said so"}]}, policy
+        )

@@ -8,6 +8,7 @@ because neither scrub_check nor a reviewer can tell a fake one from a real one.
 
 from __future__ import annotations
 
+import logging
 import sys
 import uuid
 from pathlib import Path
@@ -54,10 +55,43 @@ def redactor(roster):
 # --- fail-closed -------------------------------------------------------------
 
 
-def test_empty_roster_refuses_to_run():
-    """An empty deny-list redacts nothing while reporting success."""
-    with pytest.raises(RedactionUnavailable):
-        Redactor(roster=Roster())
+def test_empty_roster_degrades_loudly_instead_of_refusing(caplog):
+    """Reversed deliberately. This used to assert a raise.
+
+    Refusing was right for a group whose members go by real names the operator
+    could type in. This group is already pseudonymous, so there was nothing to
+    put in the file and the batch exited 2 on every window -- a control that
+    blocked everything while protecting nothing.
+
+    It must still be LOUD. The whole objection to an empty deny-list was that it
+    redacts nothing while reporting success, and that objection is answered by
+    the warning plus Roster.coverage() in the metrics, not by the risk having
+    gone away.
+    """
+    with caplog.at_level(logging.WARNING):
+        redactor = Redactor(roster=Roster())
+    assert redactor.redact("anything at all").text == "anything at all"
+    assert any("INACTIVE" in r.message for r in caplog.records), (
+        "an empty deny-list must say so; silent degradation is the failure mode"
+    )
+
+
+def test_a_handle_only_roster_is_enough_to_redact():
+    """The realistic configuration for this group: no names, no phones."""
+    redactor = Redactor(roster=Roster(handles=("zeropoint_x",)))
+    assert "zeropoint_x" not in redactor.redact("zeropoint_x reckons it is fake").text
+
+
+def test_handles_are_not_split_on_whitespace():
+    """Unlike a real name, a handle is a token.
+
+    "Anna Smith" should also catch "Anna". Splitting a HANDLE the same way
+    injects the bare word "whale" into the deny-list of an archive about crypto
+    markets, and every discussion of a large holder comes out redacted.
+    """
+    redactor = Redactor(roster=Roster(handles=("Big Whale",)))
+    assert "whale movements" in redactor.redact("tracking whale movements").text
+    assert "Big Whale" not in redactor.redact("Big Whale said so").text
 
 
 def test_missing_roster_file_raises(tmp_path):

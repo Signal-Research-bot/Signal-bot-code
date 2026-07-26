@@ -7,11 +7,26 @@ lives in .claude/skills/investigate-loop/SKILL.md: primary sources first,
 triangulation, and fact kept separate from inference kept separate from
 speculation.
 
-Every prompt below is written on the assumption that the transcript contains
-NO identities -- only "Participant A" style labels. Asking the model to avoid
-naming people would be a control that runs after the fact and cannot be
-verified; the egress firewall is the control, and these prompts simply have no
-identities to leak.
+A note on identity, corrected after the group turned out to be pseudonymous.
+
+This docstring used to say the prompts had "no identities to leak", because the
+transcript carries only "Participant A" labels and the egress firewall is the
+control. That holds for real names. It missed two things:
+
+* The labels are STABLE for the life of the archive. `Participant B` is the
+  same person in every entry, so an attributed claim in a permanent,
+  member-readable page identifies someone to the eight people best placed to
+  work out who. The firewall cannot help here -- it *allows* allocated labels,
+  by design, and a test asserts that it does.
+* Members go by chat handles, which arrive as ordinary words. The firewall's
+  name rule only knows what is in the roster, so a handle nobody listed is
+  invisible to it.
+
+Hence the instruction below not to refer to speakers at all. It is a soft
+control and is not relied on: `kb/render.py:depersonalise` strips speaker
+references from the entire record before a page is written, and again before
+anything is posted back to the group. The prompt exists to make that strip a
+no-op in the normal case, not to be the guarantee.
 """
 
 from __future__ import annotations
@@ -52,7 +67,13 @@ about the participants themselves.
 
 Return an empty list rather than manufacturing leads. A quiet window is a \
 normal, common and free outcome. Inventing work to look useful is the failure \
-mode to avoid."""
+mode to avoid.
+
+NEVER refer to a speaker in anything you write. Not by label, not by username, \
+not as "someone in the chat". Restate every lead so it stands on its own: \
+write "a claim that the Q1 attestation is an audit", never "Participant A \
+claims the Q1 attestation is an audit". Who raised something is not part of \
+the question and must not survive into your output."""
 
 
 def extract(transcript: str, domain: str) -> dict[str, Any]:
@@ -213,7 +234,13 @@ when nothing settled it.
 - `research_status`: `answered` when the bar was met, `contested` when sources \
 irreconcilably disagree, `open` when it was not established.
 - `contradictions` and `open_questions` are required. An empty list asserts \
-you looked and found none."""
+you looked and found none.
+
+NEVER refer to a speaker anywhere in the record -- not in `title`, `question`, \
+`answer`, `headline`, `tags`, or any quote. No labels like "Participant A", no \
+usernames, no "a member said". This page is a finding about the world, not a \
+record of who said what, and the people who will read it can identify each \
+other from very little."""
 
 
 def format_record(question: str, research_text: str, allowed: set[str]) -> dict[str, Any]:

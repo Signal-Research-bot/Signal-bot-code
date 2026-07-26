@@ -26,6 +26,53 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # and ISO dates match; a model-authored title does not.
 _BARE_SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
+# Speaker labels, as the transcript presents them to the model.
+_SPEAKER = re.compile(r"(?<!\w)Participants?\s+[A-Z]{1,3}(?!\w)")
+# "@handle" written by a member and copied through by the model.
+_AT_HANDLE = re.compile(r"(?<![\w@])@[A-Za-z0-9._-]{2,}")
+
+MEMBER = "a group member"
+
+# A topical slug: lowercase, hyphenated, no '@', no underscores, no digits-only.
+# Deliberately excludes the shapes handles usually take.
+_TAG_SAFE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
+
+
+def depersonalise(value: Any) -> Any:
+    """Strip participant references from model-authored text.
+
+    Runs on the record just before it becomes a permanent page, and again
+    before anything is posted back to the group.
+
+    Why this exists at all. The pipeline is careful that no *identity* reaches
+    the model, but the labels it substitutes instead are stable for the life of
+    the archive -- `Participant B` is the same person in every entry, forever.
+    Nothing stopped the model writing "Participant B was wrong about the
+    reserves" into a page, and the egress firewall accepts it by design, since
+    an allocated label is exactly what it is supposed to allow. In a group of
+    eight, a label plus the subject matter is often enough for members to work
+    out who is meant. The operator's ask was that user information stay out of
+    the research itself, and an attributed claim in a permanent, member-readable
+    file is precisely that.
+
+    So the labels are removed from the *output* rather than the input: they are
+    genuinely useful to the model while it reasons about a conversation, and
+    carry nothing once the finding is written down. A research page should read
+    as a claim about the world, not a claim about who said what.
+
+    Strips rather than blocks. A page with "a group member" in it is fine; a
+    window that fails because a label appeared is not, and the operator has
+    said plainly that a working tool matters more.
+    """
+    if isinstance(value, str):
+        out = _SPEAKER.sub(MEMBER, value)
+        return _AT_HANDLE.sub(MEMBER, out)
+    if isinstance(value, list):
+        return [depersonalise(v) for v in value]
+    if isinstance(value, dict):
+        return {k: depersonalise(v) for k, v in value.items()}
+    return value
+
 
 def slug(title: str, max_len: int = 120) -> str:
     """A filename that is safe on Windows and stable as a wikilink target."""
@@ -77,7 +124,13 @@ def _yaml_list(values: list[str]) -> str:
 
 def frontmatter(record: dict[str, Any], *, title: str, first_raised: str,
                 last_verified: str, related: list[str] | None = None) -> str:
-    tags = sorted({"signal-derived", "research", *(record.get("tags") or [])})
+    # Filtered on shape, not just trusted from the schema. An Obsidian tag is a
+    # clickable index across the whole vault, so a handle landing here would
+    # build a browsable page-set per person -- a worse outcome than the same
+    # string sitting in body text. Anything that is not a plain topical slug is
+    # dropped rather than sanitised, since a mangled tag is no use to anyone.
+    supplied = [t for t in (record.get("tags") or []) if _TAG_SAFE.fullmatch(str(t))]
+    tags = sorted({"signal-derived", "research", *supplied})
     return "\n".join(
         [
             "---",
@@ -122,6 +175,12 @@ def _bullets(items: list[str], empty: str) -> str:
 def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
            related: list[str] | None = None) -> tuple[str, str]:
     """Return (filename_stem, markdown)."""
+    # Applied to the WHOLE record before anything is read out of it, so a field
+    # added to the schema later cannot bypass it by being rendered somewhere
+    # this function does not currently look. Covers the page body, the
+    # frontmatter, and -- via slug(title) -- the filename.
+    record = depersonalise(record)
+
     # Collapsed once, here, so the frontmatter scalar, the H1 and the filename
     # all agree. A multi-line title otherwise produces a heading that silently
     # continues into body text.
