@@ -38,10 +38,12 @@ RENDER = REPO_ROOT / "signal_research_bot" / "kb" / "render.py"
 IDENTITY = REPO_ROOT / "signal_research_bot" / "identity.py"
 REDACT = REPO_ROOT / "signal_research_bot" / "redact.py"
 RECEIVER = REPO_ROOT / "signal_research_bot" / "receiver.py"
+IMPORTER = REPO_ROOT / "signal_research_bot" / "importer.py"
 SUITE = (
     "tests/test_egress.py tests/test_client.py tests/test_transcript.py "
     "tests/test_envelope.py tests/test_redact.py tests/test_kb.py "
-    "tests/test_batch.py tests/test_identity.py tests/test_receiver.py"
+    "tests/test_batch.py tests/test_identity.py tests/test_receiver.py "
+    "tests/test_importer.py"
 )
 
 
@@ -221,6 +223,30 @@ MUTATIONS: tuple[Mutation, ...] = (
         "            if rate > AUTO_HANDLE_MAX_HIT_RATE:",
         "            if False:",
         IDENTITY,
+    ),
+    Mutation(
+        "import reads rows from every conversation on the account",
+        '        if row.get(thread_col) not in threads:',
+        '        if False:',
+        IMPORTER,
+    ),
+    Mutation(
+        "imported outgoing messages get a second participant label",
+        "            source = SELF          # matches how the live receiver labels own messages",
+        "            source = acis.get(row.get(from_col, \"\"), \"\")",
+        IMPORTER,
+    ),
+    Mutation(
+        "hex group ids silently decoded as base64 (wrong group)",
+        '    if re.fullmatch(r"[0-9a-fA-F]+", text) and len(text) % 2 == 0:',
+        "    if False:",
+        IMPORTER,
+    ),
+    Mutation(
+        "remotely deleted messages resurrected by the import",
+        '        if deleted_col and str(row.get(deleted_col, "")).strip() in ("1", "true", "True"):',
+        "        if False:",
+        IMPORTER,
     ),
     Mutation(
         "display names harvested before the group filter",
