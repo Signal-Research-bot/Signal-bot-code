@@ -46,12 +46,14 @@ GATE = REPO_ROOT / "signal_research_bot" / "gate.py"
 REPAIR = REPO_ROOT / "signal_research_bot" / "kb" / "repair.py"
 DASHBOARD = REPO_ROOT / "signal_research_bot" / "kb" / "dashboard.py"
 STAGES = REPO_ROOT / "signal_research_bot" / "claude" / "stages.py"
+SCRUB = REPO_ROOT / "tools" / "scrub_check.py"
 SUITE = (
     "tests/test_egress.py tests/test_client.py tests/test_transcript.py "
     "tests/test_envelope.py tests/test_redact.py tests/test_kb.py "
     "tests/test_batch.py tests/test_identity.py tests/test_receiver.py "
     "tests/test_importer.py tests/test_kb_state.py tests/test_kb_migration.py "
-    "tests/test_gate.py tests/test_kb_repair.py tests/test_kb_dashboard.py"
+    "tests/test_gate.py tests/test_kb_repair.py tests/test_kb_dashboard.py "
+    "tests/test_scrub.py"
 )
 
 
@@ -307,6 +309,70 @@ MUTATIONS: tuple[Mutation, ...] = (
         "        if False:",
         GATE,
     ),
+    # --- living in a vault a human also writes in -----------------------------
+    #
+    # The claim these defend: the bot can see the whole archive, writes pages the
+    # vault will accept, and cannot reach anything it does not own.
+    Mutation(
+        "triage is shown one directory instead of the archive",
+        '        for path in sorted(self.vault_dir.rglob("*.md")):',
+        '        for path in sorted(self.target_dir.glob("*.md")):',
+        WRITER,
+    ),
+    Mutation(
+        "one unlucky page name wedges every future window",
+        '        if line.startswith("- ") and policy.would_block(line):',
+        "        if False:",
+        BATCH,
+    ),
+    Mutation(
+        "the bot opens a directory it does not own",
+        "        if self.subdir not in OWNED_SUBDIRS:",
+        "        if False:",
+        WRITER,
+    ),
+    Mutation(
+        "a commit stages the whole vault again",
+        '    run("add", "--", *owned)',
+        '    run("add", "-A")',
+        WRITER,
+    ),
+    Mutation(
+        "a stray staged path is committed anyway",
+        "    if stray:",
+        "    if False:",
+        WRITER,
+    ),
+    Mutation(
+        "a weak grade is written into the vault's two-value confidence key",
+        "    weak_grade = [] if confidence in _FRONTMATTER_CONFIDENCE else [confidence]",
+        "    weak_grade = []",
+        RENDER,
+    ),
+    Mutation(
+        "near-miss tags fragment the vault's tag index",
+        "        _TAG_CANONICAL.get(str(t), str(t))",
+        "        str(t)",
+        RENDER,
+    ),
+    Mutation(
+        "sidecars keep leaking speaker labels into the repo",
+        "    record = depersonalise(record)\n    return TopicState(",
+        "    return TopicState(",
+        STATE,
+    ),
+    Mutation(
+        "repair deletes links it did not compute",
+        "    merged = list(existing) + [link for link in related if link not in existing]",
+        "    merged = list(related)",
+        REPAIR,
+    ),
+    Mutation(
+        "a token exemption suppresses the bare token too",
+        "                    if any(s <= m.start() and m.end() <= e for s, e in spans):",
+        "                    if True:",
+        SCRUB,
+    ),
     # --- repairing pages the bot wrote but kept no record of ------------------
     #
     # Repair is the one path that opens a legacy page for writing. Each of these
@@ -446,8 +512,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "handle-shaped tags are no longer filtered",
-        "    supplied = [t for t in (record.get(\"tags\") or []) if _TAG_SAFE.fullmatch(str(t))]",
-        "    supplied = list(record.get(\"tags\") or [])",
+        "        if _TAG_SAFE.fullmatch(str(t))",
+        "        if str(t)",
         RENDER,
     ),
     Mutation(
