@@ -176,7 +176,23 @@ services:
       # supported container path -- separate from .env on purpose, so the
       # cache key and the pseudonym key are never in one place.
       SRB_PSEUDONYM_KEY_FILE: /app/var/pseudonym.key
-      SRB_FOREIGN_VAULT_DIR: ${SRB_FOREIGN_VAULT_DIR:-}
+      # The vault's index pages, which nearly every hand-written page in a
+      # curated vault links back to. Generated pages join that convention or
+      # they are orphans. Blank in a vault that has no hubs.
+      SRB_VAULT_HUBS: ${SRB_VAULT_HUBS:-}
+      # SRB_FOREIGN_VAULT_DIR is deliberately NOT passed through.
+      #
+      # It never worked here. The container sets SRB_KB_DIR=/vault while this
+      # would arrive as a raw host path, which on Linux is a single-component
+      # RELATIVE path -- it resolved under the working directory and matched
+      # nothing, so the containment check had never once fired in the only
+      # configuration that ships. Passing a value that cannot be compared is
+      # worse than passing none: it reads like a guard.
+      #
+      # What actually contains the bot here is this file: the ONE bind mount
+      # below is the only host directory the process can reach, and
+      # writer.OWNED_SUBDIRS is the only set of directories inside it the bot
+      # will open for writing.
     logging: *logging
     # entrypoint, NOT command. `docker compose run batch --dry-run` REPLACES
     # `command` with its own arguments, so the documented pre-flight check tried

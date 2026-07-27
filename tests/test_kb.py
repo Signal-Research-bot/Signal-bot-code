@@ -455,6 +455,56 @@ def test_digest_of_an_empty_archive(vault):
 # --- git ----------------------------------------------------------------------
 
 
+def test_the_bot_cannot_open_a_directory_it_does_not_own(vault):
+    """A positive allowlist, replacing a negative guard. "Is this the wrong
+    vault?" stops being answerable once the right answer is yes; "is this a
+    directory the bot owns?" stays answerable, and it is the question that
+    actually protects the pages a human wrote."""
+    with pytest.raises(VaultError):
+        VaultWriter(vault, subdir="Companies")
+    with pytest.raises(VaultError):
+        VaultWriter(vault, subdir="")
+
+
+@pytest.mark.parametrize("owned", ["Research Log", "Changelog", "Dashboard"])
+def test_the_three_directories_the_bot_does_own(vault, owned):
+    assert VaultWriter(vault, subdir=owned).target_dir.name == owned
+
+
+def test_a_commit_stages_only_what_the_bot_wrote(vault):
+    """`add -A` stages the vault root. Harmless while the bot owned the vault;
+    in the operator's own it would commit their unfinished work, a plugin's
+    node_modules and a settings file mapping their machine -- under the bot's
+    authorship, and push it."""
+    subprocess.run(["git", "init", "-q", str(vault)], check=True)
+    (vault / "Companies").mkdir()
+    (vault / "Companies" / "Company - X.md").write_text("hand written", encoding="utf-8")
+    (vault / "node_modules").mkdir()
+    (vault / "node_modules" / "junk.js").write_text("x", encoding="utf-8")
+    VaultWriter(vault).write("Research - a", "generated")
+
+    assert git_commit(vault, "research")
+    tracked = subprocess.run(
+        ["git", "-C", str(vault), "ls-files"], capture_output=True, text=True
+    ).stdout.splitlines()
+    assert tracked == ["Research Log/Research - a.md"]
+
+
+def test_a_commit_is_refused_if_anything_outside_was_already_staged(vault):
+    """The pathspec is the intent; this is the evidence. Committing anyway
+    would be exactly the silent damage the pathspec exists to prevent."""
+    subprocess.run(["git", "init", "-q", str(vault)], check=True)
+    (vault / "secrets.json").write_text("host stuff", encoding="utf-8")
+    subprocess.run(["git", "-C", str(vault), "add", "secrets.json"], check=True)
+    VaultWriter(vault).write("Research - a", "generated")
+
+    assert git_commit(vault, "research") is False
+    log = subprocess.run(
+        ["git", "-C", str(vault), "log", "--oneline"], capture_output=True, text=True
+    )
+    assert not log.stdout.strip(), "it committed anyway"
+
+
 def test_commit_uses_a_neutral_identity(vault):
     subprocess.run(["git", "init", "-q", str(vault)], check=True)
     w = VaultWriter(vault)

@@ -39,6 +39,24 @@ DASHBOARD_SUBDIR = "Dashboard"
 # forget when one of them is renamed.
 NOT_ARCHIVE = frozenset({CHANGELOG_SUBDIR, DASHBOARD_SUBDIR})
 
+# The only directories this module will ever open for writing, whatever vault it
+# is pointed at.
+#
+# This replaces a negative guard -- "refuse if the target is inside the
+# operator's other vault" -- with a positive one, and the difference matters now
+# that the target IS the operator's vault. The old check answered "is this the
+# wrong vault?", which stops being answerable the moment the right answer is
+# yes. This answers "is this a directory the bot owns?", which stays answerable
+# and is the question that actually protects the 272 pages a human wrote.
+#
+# It is also the guard that survives the container. The old one compared a
+# resolved host path against a resolved container path: with SRB_KB_DIR=/vault
+# inside the container and SRB_FOREIGN_VAULT_DIR passed through as a raw Windows
+# path, a Windows path is a single-component RELATIVE path on Linux, so it
+# resolved under the working directory and matched nothing. The check had never
+# fired in the only configuration that ships.
+OWNED_SUBDIRS = frozenset({RESEARCH_SUBDIR, CHANGELOG_SUBDIR, DASHBOARD_SUBDIR})
+
 
 class VaultError(RuntimeError):
     """A write was refused."""
@@ -80,6 +98,13 @@ class VaultWriter:
         self.vault_dir = self.vault_dir.resolve()
         if not self.vault_dir.is_dir():
             raise VaultError(f"vault directory does not exist: {self.vault_dir.name}")
+        if self.subdir not in OWNED_SUBDIRS:
+            # Refused at construction, not at write time, so there is no window
+            # in which a writer exists that could reach a hand-written page.
+            raise VaultError(
+                f"the bot does not own '{self.subdir}'; it may only write to "
+                f"{', '.join(sorted(OWNED_SUBDIRS))}"
+            )
         if self.foreign_vault_dir:
             foreign = self.foreign_vault_dir.resolve()
             # Guards against the target being set to -- or inside -- the
@@ -269,7 +294,38 @@ def git_commit(vault_dir: Path, message: str, *, push: bool = False) -> bool:
 
     run("config", "user.name", "signal-research-bot")
     run("config", "user.email", "signal-research-bot@users.noreply.github.com")
-    run("add", "-A")
+
+    # Staged by pathspec, never `add -A`.
+    #
+    # `add -A` stages the vault root. That was harmless while the bot owned the
+    # vault and is not harmless in the operator's own: it would stage 940
+    # node_modules files, a 9.9 MB Windows executable, a settings file holding a
+    # replayable log of commands that swept the operator's Downloads, Desktop
+    # and Pictures, and every hand edit they had in progress -- committing all
+    # of it under the bot's authorship, and pushing it.
+    #
+    # A .gitignore would cover the first two. It would not cover the operator's
+    # unfinished work, and it is a file someone can edit. This is the version
+    # that holds without anyone maintaining it.
+    owned = [d for d in sorted(OWNED_SUBDIRS) if (vault_dir / d).is_dir()]
+    if not owned:
+        return False
+    run("add", "--", *owned)
+
+    # And then check. The pathspec above is the intent; this is the evidence.
+    # A staged path outside the bot's directories means something upstream is
+    # wrong, and committing anyway would be exactly the silent damage the
+    # pathspec exists to prevent.
+    staged = run("diff", "--cached", "--name-only").stdout.splitlines()
+    stray = [p for p in staged if p and not any(p.startswith(f"{d}/") for d in owned)]
+    if stray:
+        log.error(
+            "refusing to commit: staged paths outside the directories the bot owns",
+            extra={"count": len(stray)},
+        )
+        run("reset")
+        return False
+
     result = run("commit", "-m", message)
     if result.returncode != 0:
         log.error("vault commit failed", extra={"code": result.returncode})
