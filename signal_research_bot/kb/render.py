@@ -24,7 +24,25 @@ from typing import Any
 # `#`, `[`, `]` and `^` are here because they break an Obsidian [[wikilink]]
 # even though Windows accepts them in a filename: a page whose name contains
 # one cannot be linked to, which matters now that pages link to each other.
-_UNSAFE = re.compile(r'[<>:"/\\|?*\[\]#^\x00-\x1f]')
+_UNSAFE = re.compile(r'[<>:"|?*\[\]#^\x00-\x1f]')
+
+# Path separators, handled separately because DELETING one joins two words that
+# were never one word. Three of the five live pages are named "TreasuryFed",
+# "BlackRockAnchorage" and "ZaguryElektronPeak" -- each was "Treasury/Fed",
+# "BlackRock/Anchorage", "Zagury/Elektron/Peak" before this ran. The filename is
+# the permanent wikilink target, so a mangled one is mangled forever.
+_SEPARATOR = re.compile(r"[/\\]")
+
+# Every page the bot writes is named "Research - <subject>", matching the
+# "Type - Subject" grammar every page in the operator's vault already follows
+# (Company - X, Investment - X in Y - YYYY-MM, Person - X, Source - X - date).
+#
+# It is also a namespace guard. Without it a model that titled a page "Company -
+# Anchorage Digital" would aim at the filename of a page a human wrote; the
+# writer would refuse and report a collision, which is safe but is a research
+# task lost to a naming accident.
+RESEARCH_PREFIX = "Research - "
+
 _WS = re.compile(r"\s+")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # A value that cannot change YAML's meaning: no quotes, colons, brackets,
@@ -119,8 +137,21 @@ def depersonalise(value: Any) -> Any:
 
 def slug(title: str, max_len: int = 120) -> str:
     """A filename that is safe on Windows and stable as a wikilink target."""
-    cleaned = _WS.sub(" ", _UNSAFE.sub("", title)).strip().rstrip(".")
-    return (cleaned[:max_len].rstrip() or "Untitled")
+    cleaned = _UNSAFE.sub("", _SEPARATOR.sub("-", title))
+    # Collapse and trim the substituted hyphens, or a title of pure separators
+    # becomes a file literally named "---.md".
+    cleaned = re.sub(r"-{2,}", "-", _WS.sub(" ", cleaned)).strip(" -.")
+    return (cleaned[:max_len].strip(" -.") or "Untitled")
+
+
+def research_title(title: str) -> str:
+    """The vault's "Type - Subject" grammar, applied to a model-authored title."""
+    text = _WS.sub(" ", str(title or "")).strip()
+    if not text:
+        return RESEARCH_PREFIX.rstrip(" -")
+    if text.lower().startswith(RESEARCH_PREFIX.lower()):
+        return text
+    return RESEARCH_PREFIX + text
 
 
 def normalise_topic_key(value: Any) -> str | None:
@@ -202,6 +233,40 @@ def _yaml_list(values: list[str]) -> str:
     ) + "]"
 
 
+# The grades the operator's vault records in the `confidence:` KEY. It is an
+# evidence-grade rating tied to source type, used on 88 hand-written pages, and
+# it has only ever held these two values.
+#
+# The weaker grades exist in that vault too -- as TAGS: `unverified` on 54
+# pages, `single-source` on 35. 184 pages carry no `confidence:` key at all.
+# That is not an omission, it is the convention: the key asserts a positive
+# evidence grade, and its absence plus a tag says the evidence did not reach
+# one.
+#
+# So the bot follows it. Writing four values into a key that has held two would
+# make the field ambiguous across the whole corpus with no way to tell
+# afterwards which scale any given page used -- and the vault's own Dashboard
+# has a "Confidence Breakdown" table reading exactly that key. A page's real
+# grade is never lost: it stays in the sidecar, where `_CONFIDENCE_ORDER` still
+# ranks all four for the stronger-value-wins merge. The divergence is at the
+# render boundary only.
+_FRONTMATTER_CONFIDENCE = frozenset({"primary", "corroborated"})
+
+# Near-misses that would fragment a shared tag pane: two spellings of one idea
+# produce two tags, two filtered views, and a reader who finds half the pages.
+# Left-hand side is what a model reaches for, right-hand side is what the vault
+# already uses.
+_TAG_CANONICAL = {
+    "stablecoins": "stablecoin",
+    "bitcoin-mining": "mining",
+    "crypto-custody": "custody",
+    "conflicts-of-interest": "conflict-of-interest",
+    "related-party-transactions": "related-party",
+    "institutional-finance": "institutional",
+    "corporate-ownership": "ownership",
+}
+
+
 def frontmatter(record: dict[str, Any], *, title: str, first_raised: str,
                 last_verified: str, related: list[str] | None = None,
                 topic_key: str = "") -> str:
@@ -210,28 +275,46 @@ def frontmatter(record: dict[str, Any], *, title: str, first_raised: str,
     # build a browsable page-set per person -- a worse outcome than the same
     # string sitting in body text. Anything that is not a plain topical slug is
     # dropped rather than sanitised, since a mangled tag is no use to anyone.
-    supplied = [t for t in (record.get("tags") or []) if _TAG_SAFE.fullmatch(str(t))]
-    tags = sorted({"signal-derived", "research", *supplied})
-    return "\n".join(
-        [
-            "---",
-            f"title: {_yaml_str(title)}",
-            "entity_type: research_task",
-            # On the page, not only in the index: it makes the index rebuildable
-            # from the vault alone with the same prefix scan digest() already
-            # does, so losing var/ or a sidecar costs nothing.
-            f"topic_key: {_yaml_str(topic_key)}",
-            f"research_status: {_yaml_str(record['research_status'])}",
-            f"finding: {_yaml_str(record.get('finding', 'unestablished'))}",
-            f"confidence: {_yaml_str(record['confidence'])}",
-            f"first_raised: {_yaml_str(first_raised)}",
-            f"last_verified: {_yaml_str(last_verified)}",
-            f"tags: {_yaml_list(tags)}",
-            f"sources: {_yaml_list([e['url'] for e in record.get('evidence') or []])}",
-            f"related: {_yaml_list(related or [])}",
-            "---",
-        ]
-    )
+    supplied = [
+        _TAG_CANONICAL.get(str(t), str(t))
+        for t in (record.get("tags") or [])
+        if _TAG_SAFE.fullmatch(str(t))
+    ]
+    confidence = str(record["confidence"])
+    weak_grade = [] if confidence in _FRONTMATTER_CONFIDENCE else [confidence]
+    tags = sorted({"signal-derived", "research", *supplied, *weak_grade})
+
+    lines = [
+        "---",
+        f"title: {_yaml_str(title)}",
+        "entity_type: research_task",
+        # On the page, not only in the index: it makes the index rebuildable
+        # from the vault alone with the same prefix scan digest() already
+        # does, so losing var/ or a sidecar costs nothing.
+        f"topic_key: {_yaml_str(topic_key)}",
+        f"research_status: {_yaml_str(record['research_status'])}",
+        f"finding: {_yaml_str(record.get('finding', 'unestablished'))}",
+    ]
+    if confidence in _FRONTMATTER_CONFIDENCE:
+        lines.append(f"confidence: {_yaml_str(confidence)}")
+    lines += [
+        f"first_raised: {_yaml_str(first_raised)}",
+        f"last_verified: {_yaml_str(last_verified)}",
+        f"tags: {_yaml_list(tags)}",
+        f"sources: {_yaml_list([e['url'] for e in record.get('evidence') or []])}",
+        f"related: {_yaml_list(related or [])}",
+        "---",
+    ]
+
+    block = "\n".join(lines)
+    # `status:` carries a deal-lifecycle vocabulary on 88 hand-written pages --
+    # `completed`, `closed`, `announced`, and free text like "exited 2026-03-24
+    # at $10.80/share". Emitting research state into that key would corrupt
+    # every page and every table that reads it, corpus-wide, with no way to tell
+    # afterwards which pages meant which thing. Nothing above can produce the
+    # line today; this is here so nothing added later can either.
+    assert "\nstatus:" not in block, "the bot must never write the vault's status: key"
+    return block
 
 
 def _cell(value: Any) -> str:
@@ -319,12 +402,20 @@ def render_update_block(update: dict[str, Any]) -> str:
 def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
            related: list[str] | None = None, topic_key: str = "",
            updates: list[dict[str, Any]] | None = None,
-           stem: str | None = None) -> tuple[str, str]:
+           stem: str | None = None,
+           hubs: tuple[str, ...] = ()) -> tuple[str, str]:
     """Return (filename_stem, markdown).
 
     `stem` freezes the filename. An update passes the stem the page was created
     with, because the filename is the wikilink target and renaming it breaks
     every inbound link; only a create derives it from the title.
+
+    `hubs` are the vault's index pages -- the ones nearly every hand-written
+    page links back to at the foot. That convention is why the operator's vault
+    has two orphans in 272, and a generated page that skips it is an orphan by
+    construction: nothing links to it and it links to nothing outside its own
+    tag cluster. Passed in rather than read from the environment, because the
+    hub names are a property of one vault and this module is a pure function.
     """
     # Applied to EVERYTHING before anything is read out of it, so a field added
     # to the schema later cannot bypass it by being rendered somewhere this
@@ -350,7 +441,7 @@ def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
     # all agree. A multi-line title otherwise produces a heading that silently
     # continues into body text.
     raw_title = _WS.sub(" ", str(record.get("title") or "")).strip()
-    title = raw_title or "Untitled"
+    title = research_title(raw_title or "Untitled")
 
     # Depersonalisation collapses distinct titles onto one filename: "Research -
     # Participant A on reserves" and "... Participant B on reserves" both become
@@ -368,10 +459,15 @@ def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
                 str(record.get("question", "")).encode("utf-8")
             ).hexdigest()[:6]
             stem = slug(f"{title} ({digest})")
+    # Computed once and used in both places: `related:` frontmatter and the
+    # `## Related Pages` block at the foot of the page. The vault carries the
+    # same links in both, and two lists that disagree is worse than either.
+    backlinks = list(related) + [f"[[{h}]]" for h in hubs if f"[[{h}]]" not in related]
+
     parts = [
         frontmatter(
             record, title=title, first_raised=first_raised,
-            last_verified=last_verified, related=related, topic_key=topic_key,
+            last_verified=last_verified, related=backlinks, topic_key=topic_key,
         ),
         "",
         f"# {title}",
@@ -437,4 +533,14 @@ def render(record: dict[str, Any], *, first_raised: str, last_verified: str,
         "Participants are pseudonymised; see PRIVACY.md in the source repository.",
         "",
     ]
+
+    # Last block on the page, matching the convention 271 of the 272 hand-written
+    # pages follow. The same links are in `related:` frontmatter; the vault
+    # duplicates them in the body and so does this, because that is what the
+    # vault does and a generated page that reads differently reads as an
+    # intruder. The hubs are appended so the page is reachable from the
+    # dashboard and the timeline rather than only from its own tag cluster.
+    if backlinks:
+        parts += ["## Related Pages", "", *[f"- {link}" for link in backlinks], ""]
+
     return stem, "\n".join(parts)

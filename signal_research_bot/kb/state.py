@@ -52,6 +52,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable
 
+from .render import depersonalise
+
 log = logging.getLogger(__name__)
 
 STATE_SUBDIR = ".srb-state"
@@ -205,6 +207,9 @@ def merge(state: TopicState, record: dict[str, Any], *, today: str) -> tuple[Top
       is the current one. A changed finding is stated verbatim in the update
       entry -- averaging a reversal into "mixed" would launder it.
     """
+    # Same reason as state_from_record: an update's prose goes into the sidecar
+    # as well as onto the page, and only the page was ever stripped.
+    record = depersonalise(record)
     changes: list[str] = []
 
     finding = str(record.get("finding", state.finding))
@@ -266,6 +271,16 @@ def state_from_record(
     record: dict[str, Any], *, topic_key: str, stem: str, title: str, today: str
 ) -> TopicState:
     """The state of a page being created for the first time."""
+    # Depersonalised HERE, not only in render().
+    #
+    # render() strips speaker labels from a copy of the record on its way to the
+    # page. Nothing stripped the record on its way into the sidecar -- and the
+    # sidecars live inside the vault by design, so "Participant B was wrong
+    # about the reserves" would be committed and pushed to a repository the
+    # group can read, in a file holding a stable per-person label attached to a
+    # claim. That is precisely the harm depersonalise exists to prevent, and it
+    # was reaching the repo by the one path that never called it.
+    record = depersonalise(record)
     return TopicState(
         topic_key=topic_key, stem=stem, title=title,
         first_raised=today, last_verified=today,

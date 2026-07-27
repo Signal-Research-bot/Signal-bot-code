@@ -107,6 +107,7 @@ def _file_record(
     today: str,
     stats: dict[str, Any],
     log_lines: list[str],
+    hubs: tuple[str, ...] = (),
 ) -> bool:
     """Create a page, update one, or refuse. True when the vault now holds it.
 
@@ -157,6 +158,7 @@ def _file_record(
         first_raised=new_state.first_raised, last_verified=new_state.last_verified,
         topic_key=topic_key, stem=stem, updates=list(updates),
         related=index.related_stems(topic_key, new_state.tags),
+        hubs=hubs,
     )
     result = vault.write(stem, markdown, overwrite=state is not None)
     if not result.wrote:
@@ -496,7 +498,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
                 filed = _file_record(
                     vault, index, record, task,
                     question=question, today=today, stats=stats,
-                    log_lines=log_lines,
+                    log_lines=log_lines, hubs=cfg.vault_hubs,
                 )
                 if not filed:
                     continue

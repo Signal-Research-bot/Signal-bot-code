@@ -224,6 +224,170 @@ def test_refuses_a_vault_inside_the_pre_existing_research_vault(tmp_path):
         VaultWriter(foreign / "nested", foreign_vault_dir=foreign)
 
 
+# --- fitting the vault's house style ------------------------------------------
+
+
+def _fm(confidence="primary", **kw):
+    from signal_research_bot.kb.render import frontmatter
+
+    record = {"research_status": "answered", "confidence": confidence,
+              "evidence": [], "tags": []}
+    record.update(kw)
+    return frontmatter(record, title="T", first_raised="2026-07-24",
+                       last_verified="2026-07-26")
+
+
+def test_a_positive_evidence_grade_is_written_to_the_confidence_key():
+    assert "confidence: primary" in _fm("primary")
+    assert "confidence: corroborated" in _fm("corroborated")
+
+
+def test_a_weak_grade_becomes_a_tag_and_the_confidence_key_is_omitted():
+    """The vault's `confidence:` key is an evidence grade that has only ever
+    held two values across 88 hand-written pages; the weaker grades live as
+    tags, on pages carrying no `confidence:` at all. Writing four values into
+    that key makes the field ambiguous corpus-wide with no way to tell
+    afterwards which scale a page used -- and the vault's Dashboard has a
+    Confidence Breakdown table reading exactly it."""
+    block = _fm("single-source")
+    assert "confidence:" not in block
+    assert '"single-source"' in block
+
+    block = _fm("unverified")
+    assert "confidence:" not in block
+    assert '"unverified"' in block
+
+
+def test_the_real_grade_is_never_lost_even_when_it_leaves_the_page():
+    """It stays in the sidecar, which is what ranks the stronger value on an
+    update. The divergence is at the render boundary only."""
+    from signal_research_bot.kb.state import state_from_record
+
+    state = state_from_record(
+        {"confidence": "single-source", "question": "q"},
+        topic_key="k", stem="s", title="t", today="2026-07-26",
+    )
+    assert state.confidence == "single-source"
+
+
+def test_the_bot_can_never_write_the_vaults_status_key():
+    """`status:` holds a deal-lifecycle vocabulary on 88 pages -- completed,
+    closed, announced, and free text. Research state in that key corrupts every
+    page and every table that reads it."""
+    block = _fm(research_status="open")
+    assert "\nstatus:" not in block
+    assert "research_status: open" in block
+
+
+def test_near_miss_tags_are_folded_onto_the_vaults_own_spelling():
+    """Two spellings of one idea produce two tags, two filtered views, and a
+    reader who finds half the pages."""
+    block = _fm(tags=["stablecoins", "bitcoin-mining", "tether"])
+    assert '"stablecoin"' in block and '"stablecoins"' not in block
+    assert '"mining"' in block and '"bitcoin-mining"' not in block
+    assert '"tether"' in block
+
+
+def test_a_sidecar_never_stores_an_unstripped_speaker_label():
+    """Sidecars live inside the vault and are committed with it. render() strips
+    a copy of the record on its way to the page; nothing stripped the record on
+    its way here, so a stable per-person label attached to a claim was reaching
+    a member-readable repo by the one path that never called depersonalise."""
+    from signal_research_bot.kb.state import state_from_record
+
+    state = state_from_record(
+        {"question": "Was Participant B right?",
+         "answer": "Participant C disagreed.",
+         "headline": "Participant A was wrong."},
+        topic_key="k", stem="s", title="t", today="2026-07-26",
+    )
+    blob = f"{state.question} {state.answer} {state.headline}"
+    assert "Participant" not in blob
+    assert blob.count("a group member") == 3
+
+
+def test_a_page_is_named_for_the_vaults_type_subject_grammar():
+    """Every hand-written page in the vault is "Type - Subject[ - Date]". A page
+    that is not reads as an intruder, and sorts away from its own kind."""
+    from signal_research_bot.kb.render import research_title
+
+    assert research_title("Tether's reserve attestations") == (
+        "Research - Tether's reserve attestations"
+    )
+
+
+def test_the_prefix_is_not_applied_twice():
+    from signal_research_bot.kb.render import research_title
+
+    assert research_title("Research - already prefixed") == "Research - already prefixed"
+
+
+def test_a_model_title_cannot_aim_at_another_page_type(tmp_path):
+    """A record titled "Company - Anchorage Digital" would otherwise target the
+    filename of a page a human wrote. The writer refuses and reports a
+    collision, which is safe -- but it is research lost to a naming accident."""
+    from signal_research_bot.kb.render import render
+
+    stem, _ = render(
+        {"title": "Company - Anchorage Digital", "question": "q", "answer": "a",
+         "research_status": "answered", "confidence": "primary", "evidence": []},
+        first_raised="2026-07-26", last_verified="2026-07-26",
+    )
+    assert stem == "Research - Company - Anchorage Digital"
+
+
+def test_a_slash_in_a_title_does_not_weld_two_words_together():
+    """Deleting the separator produced "TreasuryFed", "BlackRockAnchorage" and
+    "ZaguryElektronPeak" on three of the five live pages. The filename is the
+    permanent wikilink target, so a mangled one is mangled forever."""
+    assert slug("Treasury/Fed under Yellen") == "Treasury-Fed under Yellen"
+    assert slug("Zagury/Elektron/Peak mining") == "Zagury-Elektron-Peak mining"
+
+
+def test_a_page_links_back_to_the_vaults_hub_pages():
+    """The convention 271 of 272 hand-written pages follow, and the reason the
+    vault has two orphans. A generated page that skips it is an orphan by
+    construction."""
+    from signal_research_bot.kb.render import render
+
+    _, markdown = render(
+        {"title": "T", "question": "q", "answer": "a", "research_status": "open",
+         "confidence": "unverified", "evidence": []},
+        first_raised="2026-07-26", last_verified="2026-07-26",
+        hubs=("Investment Network Overview", "Timeline"),
+    )
+    assert "## Related Pages" in markdown
+    assert "- [[Investment Network Overview]]" in markdown
+    assert "- [[Timeline]]" in markdown
+    # The same links are in frontmatter, and two lists that disagree is worse
+    # than either.
+    assert 'related: ["[[Investment Network Overview]]", "[[Timeline]]"]' in markdown
+
+
+def test_a_hub_already_in_related_is_not_listed_twice():
+    from signal_research_bot.kb.render import render
+
+    _, markdown = render(
+        {"title": "T", "question": "q", "answer": "a", "research_status": "open",
+         "confidence": "unverified", "evidence": []},
+        first_raised="2026-07-26", last_verified="2026-07-26",
+        related=["[[Timeline]]"], hubs=("Timeline",),
+    )
+    assert markdown.count("[[Timeline]]") == 2, "once in frontmatter, once in the body"
+
+
+def test_no_hubs_configured_means_no_backlink_block():
+    """The hub page names belong to one operator's vault; this module does not."""
+    from signal_research_bot.kb.render import render
+
+    _, markdown = render(
+        {"title": "T", "question": "q", "answer": "a", "research_status": "open",
+         "confidence": "unverified", "evidence": []},
+        first_raised="2026-07-26", last_verified="2026-07-26",
+    )
+    assert "## Related Pages" not in markdown
+
+
 def test_digest_lists_titles_and_statuses_only(vault):
     w = VaultWriter(vault)
     w.write(

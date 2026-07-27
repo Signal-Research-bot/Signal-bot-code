@@ -84,6 +84,7 @@ class Config:
     metrics_path: Path
     kb_dir: Path | None
     foreign_vault_dir: Path | None
+    vault_hubs: tuple[str, ...]
     log_level: str
     max_tasks_per_window: int
     max_updates_per_window: int
@@ -112,6 +113,13 @@ class Config:
             metrics_path=var_dir / "metrics.jsonl",
             kb_dir=Path(kb) if kb else None,
             foreign_vault_dir=Path(foreign) if foreign else None,
+            # The vault's index pages, which nearly every page in a curated
+            # vault links back to. Blank in a vault that has none -- the bot
+            # then writes no backlink block rather than inventing a hub.
+            vault_hubs=tuple(
+                h.strip() for h in os.environ.get("SRB_VAULT_HUBS", "").split(",")
+                if h.strip()
+            ),
             log_level=os.environ.get("SRB_LOG_LEVEL", "INFO").upper(),
             max_tasks_per_window=int(os.environ.get("SRB_MAX_TASKS_PER_WINDOW", "4")),
             max_updates_per_window=int(os.environ.get("SRB_MAX_UPDATES_PER_WINDOW", "2")),

@@ -125,7 +125,7 @@ def cfg_for(tmp_path: Path, **kw) -> Config:
         pseudonyms_path=tmp_path / "p.json",
         quarantine_dir=tmp_path / "q",
         metrics_path=tmp_path / "metrics.jsonl",
-        kb_dir=tmp_path / "vault", foreign_vault_dir=None,
+        kb_dir=tmp_path / "vault", foreign_vault_dir=None, vault_hubs=(),
         log_level="CRITICAL", max_tasks_per_window=4, max_updates_per_window=2,
         fetch_max_uses=3,
         worth_threshold=0.6,
