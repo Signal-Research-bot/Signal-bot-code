@@ -38,11 +38,41 @@ signal-cli (native, no JRE)  ──JSON-RPC/TCP──►  receiver  ──►  e
                                                                     no
                                                                     ▼
                                                        deep research (Opus)
+                                                       + fetch links the group
+                                                         actually posted
                                                                     │
                                                 (same firewall, inbound)
                                                                     ▼
                                               Markdown → private git repo
 ```
+
+## One page per topic
+
+The archive is not a log. A page is keyed on a stable `topic_key`, so later
+research on a subject already covered **updates that page** — `last_verified`
+advances, sources and open questions are unioned rather than replaced, and a
+dated entry is appended under `## Updates`. Nothing is renamed, because the
+filename is the wikilink target.
+
+A page a human has edited is never touched: the bot stores a hash of the bytes
+it last wrote, and if the file differs, the update is refused and recorded in
+`Changelog/` for someone to reconcile by hand. `Dashboard/Research Overview.md`
+is regenerated each run as a plain-Markdown index of every topic, so the archive
+is navigable on a git host with no plugin and no Obsidian.
+
+## Links posted in the chat
+
+A link shared as evidence is a lead: the claim is about what the document says.
+The deep stage can retrieve and read one, bounded by `SRB_FETCH_MAX_USES`
+(`0` switches it off entirely).
+
+The control is deterministic and lives in [`batch.py`](signal_research_bot/batch.py):
+a URL is offered only if the transcript builder recorded it surviving redaction
+into a line, **character for character**. The model echoes URLs through two
+stages and is trusted with neither, so an invented, completed or tidied-up link
+fails a set-membership test rather than being retrieved. Profile links are
+redacted before that point and are additionally in the fetch tool's
+`blocked_domains`.
 
 ## The two firewalls
 
@@ -93,6 +123,8 @@ PRIVACY.md. Its own README says so at the top.
 | Would you notice if it broke? | `python -m tools.mutation_test` — breaks the firewall on purpose and proves the tests catch it |
 | What is stored, and is it encrypted? | [`cache.py`](signal_research_bot/cache.py); `looks_encrypted()` checks rather than assumes |
 | What gets removed from a message? | [`redact.py`](signal_research_bot/redact.py) |
+| Which links may be fetched, and who decides? | `task_urls` in [`batch.py`](signal_research_bot/batch.py) — set membership against the redacted transcript, not model output |
+| What does a generated page look like? | [`.claude/skills/kb-schema/SKILL.md`](.claude/skills/kb-schema/SKILL.md) |
 | What is sent to Claude, and how much does it cost? | [`.claude/skills/claude-cascade/SKILL.md`](.claude/skills/claude-cascade/SKILL.md) |
 
 The `.claude/skills/` directory is published deliberately: it contains the
@@ -147,6 +179,28 @@ docker compose up -d
 ```bash
 docker compose --profile batch run --rm batch
 ```
+
+Schedule **one** job. Two batches overlapping on the same topic would each read
+the state the other is about to replace, and one update would be lost. Nothing
+in the code enforces it.
+
+### Migrating a vault written by an older version
+
+Two one-shot commands, both with a `--dry-run` that writes nothing. `adopt`
+gives pages from before the topic index a key; `repair` puts that key on the
+page and recovers the tags, status and dates the index is missing, so those
+pages can be recognised and linked to. Neither renames anything.
+
+```bash
+docker compose --profile batch run --rm --entrypoint python batch \
+  -m signal_research_bot.kb.adopt --dry-run
+docker compose --profile batch run --rm --entrypoint python batch \
+  -m signal_research_bot.kb.repair --dry-run
+```
+
+`repair` changes exactly two lines per page and refuses any page whose bytes do
+not match what the bot last wrote. Re-running it is a no-op, so an interrupted
+run converges.
 
 ## Before you turn it on
 
