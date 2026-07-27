@@ -43,12 +43,13 @@ WRITER = REPO_ROOT / "signal_research_bot" / "kb" / "writer.py"
 BATCH = REPO_ROOT / "signal_research_bot" / "batch.py"
 STATE = REPO_ROOT / "signal_research_bot" / "kb" / "state.py"
 GATE = REPO_ROOT / "signal_research_bot" / "gate.py"
+REPAIR = REPO_ROOT / "signal_research_bot" / "kb" / "repair.py"
 SUITE = (
     "tests/test_egress.py tests/test_client.py tests/test_transcript.py "
     "tests/test_envelope.py tests/test_redact.py tests/test_kb.py "
     "tests/test_batch.py tests/test_identity.py tests/test_receiver.py "
     "tests/test_importer.py tests/test_kb_state.py tests/test_kb_migration.py "
-    "tests/test_gate.py"
+    "tests/test_gate.py tests/test_kb_repair.py"
 )
 
 
@@ -294,6 +295,40 @@ MUTATIONS: tuple[Mutation, ...] = (
         '        if float(task.get("worth", 0.0)) < worth_threshold:',
         "        if False:",
         GATE,
+    ),
+    # --- repairing pages the bot wrote but kept no record of ------------------
+    #
+    # Repair is the one path that opens a legacy page for writing. Each of these
+    # reverts a guard that decides whether it may.
+    Mutation(
+        "a page edited since the bot wrote it is repaired anyway",
+        "    if content_hash(text) != state.content_sha and not _carries_our_key(",
+        "    if False and content_hash(text) != state.content_sha and not _carries_our_key(",
+        REPAIR,
+    ),
+    Mutation(
+        "a crashed repair wedges the page forever instead of re-running",
+        "def _carries_our_key(lines: list[str], span: tuple[int, int], topic_key: str) -> bool:",
+        "def _carries_our_key(lines: list[str], span: tuple[int, int], topic_key: str) -> bool:\n    return False",
+        REPAIR,
+    ),
+    Mutation(
+        "an unrecognised tags line is read as empty instead of refused",
+        "def _parse_tags(value: str) -> tuple[str, ...] | None:",
+        "def _parse_tags(value: str) -> tuple[str, ...] | None:\n    return ()",
+        REPAIR,
+    ),
+    Mutation(
+        "a topic key belonging to another topic is reassigned",
+        "        if lines[hits[0]] != key_line:",
+        "        if False:",
+        REPAIR,
+    ),
+    Mutation(
+        "related is computed before the other pages' tags are known",
+        "        index.stage(replace(index.get(p.topic_key), tags=p.tags, **p.facts))",
+        "        index.stage(replace(index.get(p.topic_key), tags=(), **p.facts))",
+        REPAIR,
     ),
     # --- keeping participants out of the research itself ---------------------
     #

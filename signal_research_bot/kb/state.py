@@ -324,8 +324,19 @@ class VaultIndex:
     def all(self) -> list[TopicState]:
         return sorted(self._by_key.values(), key=lambda s: s.topic_key)
 
-    def put(self, state: TopicState) -> None:
+    def stage(self, state: TopicState) -> None:
+        """Record in memory only. `put` is what makes it durable.
+
+        Exists so a dry run can compute exactly what a real run would write.
+        `related_stems` reads the whole index, so a plan built against an index
+        that has not seen the other pages' recovered tags prints a different
+        answer to the one the real run produces -- which is the one way a dry
+        run can be worse than no dry run at all.
+        """
         self._by_key[state.topic_key] = state
+
+    def put(self, state: TopicState) -> None:
+        self.stage(state)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         path = self.state_dir / f"{state.topic_key}.json"
         tmp = path.with_suffix(".json.tmp")
