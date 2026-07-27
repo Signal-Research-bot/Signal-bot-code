@@ -57,6 +57,15 @@ SUITE = (
 
 @dataclass(frozen=True)
 class Mutation:
+    """One deliberate break. `old` must be a SINGLE line.
+
+    Files here are read and written as bytes so an interrupted run leaves at
+    most one line to put back, which means a multi-line `old` written with "\\n"
+    will not match a file stored with CRLF -- it reports STALE, correctly but
+    confusingly. `new` may span lines: a mutated file with mixed endings parses
+    fine and is thrown away either way.
+    """
+
     label: str
     old: str
     new: str
@@ -351,9 +360,15 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "the fetch kill switch is ignored",
-        "                        urls=task_urls if cfg.fetch_max_uses else (),",
-        "                        urls=task_urls,",
-        BATCH,
+        "    if urls and fetch_max_uses > 0:",
+        "    if urls:",
+        STAGES,
+    ),
+    Mutation(
+        "the fetch tool goes out on tasks with nothing to fetch",
+        "    if urls and fetch_max_uses > 0:",
+        "    if fetch_max_uses > 0:",
+        STAGES,
     ),
     Mutation(
         "fetched pages are never harvested as sources",
@@ -377,12 +392,6 @@ MUTATIONS: tuple[Mutation, ...] = (
         "personal hosts are fetchable",
         '            "blocked_domains": sorted(PERSONAL_HOSTS),',
         '            "blocked_domains": [],',
-        STAGES,
-    ),
-    Mutation(
-        "the cheap stage is handed the fetch tool it cannot accept",
-        "    links, fetch = \"\", None\n    if urls and fetch_max_uses > 0:",
-        "    links, fetch = \"\", None\n    if True:",
         STAGES,
     ),
     Mutation(

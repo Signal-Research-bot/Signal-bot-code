@@ -358,6 +358,15 @@ def test_the_deep_stage_carries_a_bounded_fetch_tool():
     assert "https://a.example/doc" in deep["messages"][0]["content"]
 
 
+def test_a_task_with_no_links_gets_no_fetch_tool():
+    """Most tasks have none. Sending the tool anyway advertises a capability
+    with nothing to use it on and puts a fetch budget on a task that cannot
+    spend it."""
+    from signal_research_bot.claude import stages
+
+    assert [t["name"] for t in stages.deep_research("q", "why")["tools"]] == ["web_search"]
+
+
 def test_the_cheap_stage_never_carries_a_fetch_tool():
     """web_fetch_20260209 has the same model gate as the dynamic-filtering
     search tool, so sending it to Haiku is a 400 on every task in the window --

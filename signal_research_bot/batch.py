@@ -420,9 +420,15 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
                 stats["escalated"] += 1
                 notes = json.dumps(cheap) if cheap else ""
                 research_text, _ = client.send(
+                    # The kill switch is enforced once, in deep_research, which
+                    # is where the request is built. A second `if cfg.fetch_max_uses`
+                    # here read as defence in depth and was really a branch no
+                    # test could tell from its absence -- mutation testing found
+                    # it surviving, which is the useful thing about a guard
+                    # nothing can observe: it is not a guard.
                     **stages.deep_research(
                         question, why, notes,
-                        urls=task_urls if cfg.fetch_max_uses else (),
+                        urls=task_urls,
                         fetch_max_uses=cfg.fetch_max_uses,
                     )
                 )
