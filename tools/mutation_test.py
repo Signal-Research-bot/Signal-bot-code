@@ -496,9 +496,26 @@ def _run_suite() -> bool:
     return proc.returncode == 0
 
 
+def _read(path: Path) -> str:
+    """Read without newline translation.
+
+    `read_text`/`write_text` round-trip a CRLF file unchanged on Windows and
+    silently rewrite an LF one into CRLF -- every line of it. A completed run
+    hides that, because the `finally` below restores byte-exact copies; a run
+    that is interrupted leaves whole files rewritten, and the real one-line
+    mutation is invisible in a diff of six hundred changed lines. Bytes in,
+    bytes out, so an interrupted run leaves at most one line to put back.
+    """
+    return path.read_bytes().decode("utf-8")
+
+
+def _write(path: Path, text: str) -> None:
+    path.write_bytes(text.encode("utf-8"))
+
+
 def main() -> int:
     targets = {m.target for m in MUTATIONS}
-    originals = {t: t.read_text(encoding="utf-8") for t in targets}
+    originals = {t: _read(t) for t in targets}
 
     if not _run_suite():
         print("baseline suite is already failing -- fix that first.", file=sys.stderr)
@@ -517,13 +534,13 @@ def main() -> int:
                     survivors.append(f"{m.label} (stale pattern)")
                     continue
 
-                m.target.write_text(source.replace(m.old, m.new, 1), encoding="utf-8")
+                _write(m.target, source.replace(m.old, m.new, 1))
                 if _run_suite():
                     print(f"  SURVIVED {m.label}")
                     survivors.append(m.label)
                 else:
                     print(f"  killed   {m.label}")
-                m.target.write_text(source, encoding="utf-8")
+                _write(m.target, source)
         finally:
             for t, b in backups.items():
                 shutil.copy2(b, t)
