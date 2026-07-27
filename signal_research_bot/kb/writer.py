@@ -27,6 +27,17 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 RESEARCH_SUBDIR = "Research Log"
+CHANGELOG_SUBDIR = "Changelog"
+DASHBOARD_SUBDIR = "Dashboard"
+
+# Directories whose contents are the bot's own bookkeeping, not archive entries.
+# Offering these to triage would invite it to dedupe real research against the
+# changelog, or against the index page that lists the research.
+#
+# Defined here rather than in the modules that write them, because `digest()`
+# has to exclude them and a second copy of the string is a second thing to
+# forget when one of them is renamed.
+NOT_ARCHIVE = frozenset({CHANGELOG_SUBDIR, DASHBOARD_SUBDIR})
 
 
 class VaultError(RuntimeError):
@@ -136,30 +147,82 @@ class VaultWriter:
         log.info("appended", extra={"path": path, "bytes": len(markdown)})
         return WriteResult(path, outcome)
 
-    def digest(self, limit: int = 400) -> str:
-        """A compact index of existing entries, for the triage stage.
+    def digest(self, limit: int = 600) -> str:
+        """A compact index of the WHOLE vault, for the triage stage.
 
         Titles, statuses and topic keys only. Sending answer bodies back would
         balloon the cached prefix for no gain -- triage only needs to know what
         already exists, and which key to reproduce if it sees the same subject
         raised again.
 
+        This used to glob `Research Log/` alone, which was right while the bot
+        owned its vault and became the central defect the moment it did not. In
+        a vault the operator has also been writing in by hand, one directory is
+        a fraction of the archive: triage was shown five pages out of 277 and
+        confidently researched five subjects the vault already covered, from
+        primary sources, at Opus prices. Deduplication against an archive you
+        cannot see is not deduplication.
+
+        So it walks every content directory. Pages the bot wrote carry a
+        `topic_key` and a `research_status`; hand-written pages carry neither
+        and are listed with their `entity_type` instead. That difference is
+        deliberate and is explained to the model in the triage prompt: a key it
+        is shown is a page it may update, and an entry with no key is a page it
+        may only mark as a duplicate.
+
+        Grouped by directory because the vault's directories ARE its taxonomy,
+        and a flat 277-line list buries that.
+
         The scan window is 20 lines rather than the frontmatter's exact height:
         at 12 it was exactly the block size, so one added key would have pushed
         a value out of range and silently degraded every entry to "unknown".
         """
-        if not self.target_dir.is_dir():
+        if not self.vault_dir.is_dir():
             return "(archive is empty)"
-        lines = []
-        for path in sorted(self.target_dir.glob("*.md"))[:limit]:
-            status, key = "unknown", "-"
+
+        by_dir: dict[str, list[str]] = {}
+        seen = 0
+        truncated = 0
+        for path in sorted(self.vault_dir.rglob("*.md")):
+            rel = path.relative_to(self.vault_dir)
+            # Dot-directories are Obsidian's, git's and the bot's own state.
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            if rel.parts[0] in NOT_ARCHIVE:
+                continue
+            if seen >= limit:
+                truncated += 1
+                continue
+            seen += 1
+
+            status = key = entity = ""
             for line in path.read_text(encoding="utf-8").splitlines()[:20]:
                 if line.startswith("research_status:"):
                     status = line.split(":", 1)[1].strip()
                 elif line.startswith("topic_key:"):
-                    key = line.split(":", 1)[1].strip() or "-"
-            lines.append(f"- {path.stem} [{status}] (key: {key})")
-        return "\n".join(lines) or "(archive is empty)"
+                    key = line.split(":", 1)[1].strip()
+                elif line.startswith("entity_type:"):
+                    entity = line.split(":", 1)[1].strip()
+
+            if key:
+                entry = f"- {path.stem} [{status or 'unknown'}] (key: {key})"
+            else:
+                entry = f"- {path.stem}" + (f" [{entity}]" if entity else "")
+            by_dir.setdefault(str(rel.parent) if rel.parent.name else "/", []).append(entry)
+
+        if not by_dir:
+            return "(archive is empty)"
+        out: list[str] = []
+        for folder in sorted(by_dir):
+            out.append(f"{folder}/" if folder != "/" else "(vault root)")
+            out.extend(by_dir[folder])
+            out.append("")
+        if truncated:
+            # Never silent: a truncated listing reads exactly like a complete
+            # one, and the consequence here is the bot re-researching whatever
+            # fell off the end.
+            out.append(f"({truncated} further page(s) not listed -- index limit reached)")
+        return "\n".join(out).strip()
 
 
 def git_commit(vault_dir: Path, message: str, *, push: bool = False) -> bool:

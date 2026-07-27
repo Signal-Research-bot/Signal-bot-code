@@ -38,7 +38,7 @@ from .identity import (
 from .kb.dashboard import write_dashboard
 from .kb.render import depersonalise, normalise_topic_key, render, slug, title_for
 from .kb.state import VaultIndex, content_hash, merge, state_from_record
-from .kb.writer import VaultError, VaultWriter, git_commit
+from .kb.writer import CHANGELOG_SUBDIR, VaultError, VaultWriter, git_commit
 from .logging_setup import configure
 from .metrics import record_run
 from .notify import Notifier, SendFailed
@@ -47,7 +47,35 @@ from .transcript import Builder
 
 log = logging.getLogger(__name__)
 
-CHANGELOG_SUBDIR = "Changelog"
+
+def safe_digest(digest: str, policy: Policy, stats: dict[str, Any]) -> str:
+    """Drop archive-index lines that would fail the firewall on the way out.
+
+    The index is built from the FILENAMES of pages, and in a vault the operator
+    writes in by hand those filenames were never redacted -- they are not
+    message content, so nothing upstream ever looked at them. One page named
+    after a group member would therefore fail `check_outbound`, and a blocked
+    window is quarantined and CONSUMED rather than retried: a single unlucky
+    filename would end every future window, silently, forever.
+
+    The firewall still runs unchanged over the whole request. This only decides
+    what the pipeline puts INTO the request, which is the one part it owns. What
+    was dropped is counted, because an index quietly missing a page makes the
+    bot re-research it.
+    """
+    kept, dropped = [], 0
+    for line in digest.splitlines():
+        if line.startswith("- ") and policy.would_block(line):
+            dropped += 1
+            continue
+        kept.append(line)
+    if dropped:
+        stats["digest_lines_withheld"] = dropped
+        log.warning(
+            "archive index lines withheld: a page name matches roster identity",
+            extra={"count": dropped},
+        )
+    return "\n".join(kept)
 
 
 def resolve_topic_key(
@@ -318,7 +346,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
             _finish(cache, window_id, messages, cfg, client, stats, vault, index=index)
             return 0
 
-        digest = vault.digest() if vault else "(archive is empty)"
+        digest = safe_digest(vault.digest(), policy, stats) if vault else "(archive is empty)"
         triaged, _ = client.send_json(
             **stages.triage(candidates, digest, cfg.research_domain)
         )

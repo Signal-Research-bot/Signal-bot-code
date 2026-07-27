@@ -700,6 +700,39 @@ def test_the_changelog_is_not_offered_to_triage_as_an_archive_entry(env, monkeyp
     assert "Changelog" not in triage_prompt
 
 
+def test_a_page_named_after_a_member_is_withheld_from_the_index(env, monkeypatch):
+    """The index is built from FILENAMES of pages a human wrote, which were
+    never redacted -- nothing upstream looks at them. One page named after a
+    member would fail the firewall, and a blocked window is consumed rather than
+    retried: a single unlucky filename would end every future window forever."""
+    log_dir = env / "vault" / "Companies"
+    log_dir.mkdir(parents=True)
+    (log_dir / "Company - Anna Smith Holdings.md").write_text(
+        "---\nentity_type: company\n---\n", encoding="utf-8"
+    )
+    (log_dir / "Company - Anchorage Digital.md").write_text(
+        "---\nentity_type: company\n---\n", encoding="utf-8"
+    )
+    _run_window(env, monkeypatch)
+
+    metrics = (env / "metrics.jsonl").read_text(encoding="utf-8")
+    assert '"digest_lines_withheld": 1' in metrics
+    assert "Anna Smith" not in metrics
+
+
+def test_the_index_the_bot_sends_covers_the_whole_vault(env, monkeypatch):
+    """Not just its own directory. This is the change that stops it paying to
+    re-research a subject the vault already covers."""
+    (env / "vault" / "Companies").mkdir(parents=True)
+    (env / "vault" / "Companies" / "Company - Anchorage Digital.md").write_text(
+        "---\nentity_type: company\n---\n", encoding="utf-8"
+    )
+    _run_window(env, monkeypatch)
+    client = _run_window(env, monkeypatch)
+    triage_prompt = str(client.requests["triage"].get("system", ""))
+    assert "Company - Anchorage Digital [company]" in triage_prompt
+
+
 def _dashboard(env):
     return env / "vault" / "Dashboard" / "Research Overview.md"
 

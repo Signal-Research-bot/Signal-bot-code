@@ -163,6 +163,32 @@ class Policy:
                 out.append(d[-7:])   # national tail, written without prefix
         return tuple(out)
 
+    def would_block(self, text: str) -> bool:
+        """Would this fragment trip the identity rules? Asks, does not raise.
+
+        For content the pipeline ASSEMBLES rather than receives -- specifically
+        the archive index, which is built from the filenames of pages a human
+        wrote. Those filenames are not message content and were never redacted,
+        so one page named after a group member would fail the firewall on the
+        way out, and a blocked window is consumed rather than retried: a single
+        unlucky filename would silently end every future window.
+
+        The firewall is not weakened by this. It still runs, unchanged, over the
+        whole serialised body. This just lets a caller drop the one line it
+        assembled rather than lose the window, and the caller counts what it
+        dropped.
+        """
+        folded = _normalise(text)
+        return any(
+            re.search(rf"(?<!\w){re.escape(v)}(?!\w)", folded, re.I)
+            for v in self._name_variants
+        ) or bool(
+            self.roster.group_name
+            and re.search(
+                rf"(?<!\w){re.escape(self.roster.group_name)}(?!\w)", folded, re.I
+            )
+        )
+
 
 # --- the firewall -------------------------------------------------------------
 #

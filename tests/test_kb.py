@@ -226,10 +226,62 @@ def test_refuses_a_vault_inside_the_pre_existing_research_vault(tmp_path):
 
 def test_digest_lists_titles_and_statuses_only(vault):
     w = VaultWriter(vault)
-    w.write("Research - a - 2026-07", "---\nresearch_status: answered\n---\nbody text")
+    w.write(
+        "Research - a - 2026-07",
+        "---\nresearch_status: answered\ntopic_key: a-topic\n---\nbody text",
+    )
     digest = w.digest()
-    assert "Research - a - 2026-07 [answered]" in digest
+    assert "Research - a - 2026-07 [answered] (key: a-topic)" in digest
     assert "body text" not in digest, "digest must not carry answer bodies"
+
+
+def test_digest_indexes_the_whole_vault_not_one_directory(vault):
+    """The central defect this fixes: triage was shown five pages out of 277 and
+    researched five subjects the vault already covered, from primary sources, at
+    Opus prices. Deduplication against an archive you cannot see is not
+    deduplication."""
+    (vault / "Companies").mkdir()
+    (vault / "Companies" / "Company - Anchorage Digital.md").write_text(
+        "---\ntitle: Company - Anchorage Digital\nentity_type: company\n---\n",
+        encoding="utf-8",
+    )
+    VaultWriter(vault).write("Research - a - 2026-07", "---\nresearch_status: open\n---\n")
+
+    digest = VaultWriter(vault).digest()
+    assert "Company - Anchorage Digital [company]" in digest
+    assert "Research - a - 2026-07" in digest
+    assert "Companies/" in digest, "the folder taxonomy is part of the signal"
+
+
+def test_a_hand_written_page_is_listed_without_a_key(vault):
+    """The difference triage acts on: a key means "you may update this page",
+    no key means "this subject is covered, you may only call it a duplicate"."""
+    (vault / "Companies").mkdir()
+    (vault / "Companies" / "Company - X.md").write_text(
+        "---\nentity_type: company\n---\n", encoding="utf-8"
+    )
+    assert "(key:" not in VaultWriter(vault).digest()
+
+
+def test_the_bots_own_bookkeeping_is_not_offered_as_an_archive_entry(vault):
+    """Otherwise triage dedupes real research against the changelog, or against
+    the index page that lists the research."""
+    for sub in ("Changelog", "Dashboard"):
+        (vault / sub).mkdir()
+        (vault / sub / "thing.md").write_text("---\ntitle: t\n---\n", encoding="utf-8")
+    assert "thing" not in VaultWriter(vault).digest()
+
+
+def test_a_truncated_index_says_so(vault):
+    """A truncated listing reads exactly like a complete one, and the
+    consequence is the bot re-researching whatever fell off the end."""
+    (vault / "Companies").mkdir()
+    for i in range(5):
+        (vault / "Companies" / f"Company - {i}.md").write_text(
+            "---\nentity_type: company\n---\n", encoding="utf-8"
+        )
+    digest = VaultWriter(vault).digest(limit=3)
+    assert "2 further page(s) not listed" in digest
 
 
 def test_digest_of_an_empty_archive(vault):

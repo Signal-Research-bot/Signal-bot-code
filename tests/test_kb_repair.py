@@ -283,9 +283,10 @@ def test_the_digest_stops_reporting_an_unknown_key(vault):
     """Triage may only reuse a key it has been shown. While the pages read
     `(key: -)` the same subject raised again opened a second page."""
     writer = VaultWriter(vault_dir=vault.parent, subdir=vault.name)
-    assert "(key: -)" in writer.digest()
+    assert "(key:" not in writer.digest(), "a key it was never shown does not exist"
     repair(vault)
-    assert "(key: -)" not in writer.digest()
+    digest = writer.digest()
+    assert digest.count("(key:") == 3, "every page is now updatable in place"
 
 
 def _resync(vault_dir: Path, path: Path) -> None:

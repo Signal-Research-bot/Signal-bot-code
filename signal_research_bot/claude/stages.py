@@ -141,10 +141,25 @@ shorten or correct any of them.
 `duplicate_of` must name an existing archive entry only when the SAME question \
 is already answered there. A related entry is not a duplicate.
 
-The archive listing shows a key for each entry. When a lead is about a subject \
-already listed, put that key in `topic_key`, copied EXACTLY. Otherwise leave it \
-null -- never invent one. The key is how later research reaches the existing \
-page instead of opening a second one beside it.
+READ THE ARCHIVE LISTING PROPERLY. It is grouped by folder, and the folder \
+names are the archive's own taxonomy -- a lead about a company the archive \
+already has a page for is usually not new ground. There are two kinds of entry \
+and the difference decides what you may do:
+
+* `- Some Page [status] (key: some-key)` -- researched by this pipeline. If a \
+lead is about that same subject, copy the key into `topic_key` EXACTLY. That is \
+how later research reaches the existing page instead of opening a second one \
+beside it.
+* `- Some Page [company]` -- written by hand, with no key. The archive already \
+covers this subject. Treat it as a strong duplicate signal: name it in \
+`duplicate_of` and leave `topic_key` null. You cannot update it.
+
+Never invent a key. A key you were not shown does not exist.
+
+Being listed is not the same as being answered. A hand-written page about a \
+company does not settle a specific question about that company -- but it does \
+mean the basic facts are already recorded, so score `worth` on what your answer \
+would ADD, not on how interesting the subject is.
 
 `new_information` decides whether an existing entry is revisited at all, and it \
 is the only way that ever happens. Set it ONLY when the conversation raises \
