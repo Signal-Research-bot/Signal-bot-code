@@ -10,6 +10,12 @@ text to an AI service (Anthropic's Claude) to pull out research questions and
 try to answer them, and writes the answers into a private notes archive that
 only group members can read.
 
+That archive is the operator's own research vault, which they also write in by
+hand. The automated part is confined to three folders inside it — `Research
+Log/`, `Changelog/` and `Dashboard/` — and cannot open any other, cannot stage
+any other when it saves, and refuses to overwrite a page a person has edited.
+Everything else in that vault is theirs and is not produced by this software.
+
 ## The single most important thing to understand
 
 <!-- scrub-ok: privacy-word-overclaim -->

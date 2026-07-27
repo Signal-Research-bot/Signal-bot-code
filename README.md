@@ -46,6 +46,26 @@ signal-cli (native, no JRE)  ──JSON-RPC/TCP──►  receiver  ──►  e
                                               Markdown → private git repo
 ```
 
+## It writes into a vault a human also writes in
+
+The target vault is normally the operator's own research vault, not a vault of
+its own. That is deliberate, and it was the other way round first: a bot that
+cannot see the operator's archive cannot deduplicate against it. Triage was
+shown five pages out of 277 and re-researched, at Opus prices, five subjects
+the vault already covered — including one whose amount, valuation, date and
+press release were already on a page marked `confidence: primary`.
+
+What keeps that safe is not which vault it is pointed at:
+
+- **Three owned directories, checked at writer construction.** `Research Log/`,
+  `Changelog/`, `Dashboard/`. There is no window in which a writer exists that
+  could reach any other page.
+- **Commits are staged by pathspec over those three**, then verified before
+  committing. Never `git add -A` — the operator's unfinished work, a plugin's
+  `node_modules` and their editor state are not the bot's to commit or push.
+- **A page a person edited is never overwritten**, by content hash, and the
+  refusal is written into `Changelog/` rather than only logged.
+
 ## One page per topic
 
 The archive is not a log. A page is keyed on a stable `topic_key`, so later
@@ -53,6 +73,13 @@ research on a subject already covered **updates that page** — `last_verified`
 advances, sources and open questions are unioned rather than replaced, and a
 dated entry is appended under `## Updates`. Nothing is renamed, because the
 filename is the wikilink target.
+
+Generated pages take the host vault's conventions rather than imposing their
+own: its `Type - Subject` filename grammar, its frontmatter vocabulary, and its
+`## Related Pages` backlinks. See
+[`.claude/skills/kb-schema/SKILL.md`](.claude/skills/kb-schema/SKILL.md) — the
+`confidence:` and `status:` sections in particular, where getting it wrong
+corrupts a corpus rather than one page.
 
 A page a human has edited is never touched: the bot stores a hash of the bytes
 it last wrote, and if the file differs, the update is refused and recorded in
@@ -91,13 +118,25 @@ Blocks the operator's name, emails, username, hostname and any absolute path
 from being committed. Runs in pre-commit *and* CI, because pre-commit alone is
 bypassable.
 
-It scans **this** repository automatically. The knowledge-base vault is a
-separate repository and the hook does not reach it, so it has to be passed
-explicitly:
+It scans **this** repository automatically. The vault is a different repository
+and the hook does not reach it, so it has to be passed explicitly:
 
 ```bash
 python -m tools.scrub_check --all --vault /path/to/vault
 ```
+
+`--vault` reports on what would actually be **published**: once the vault is a
+git repository it asks git for tracked and non-ignored files, so a plugin's
+`node_modules` is not scanned. That matters more than it sounds. Run against a
+real 277-page vault before this change it returned 224 findings — 143 of them
+third-party JavaScript nobody could remediate and 81 one token colliding with an
+investigation subject's first name — burying the single genuine one. A gate that
+always says no is a gate people learn to walk around.
+
+Two escape hatches, both narrower than an allowlist entry. A `scrub-ok: <rule>`
+pragma suppresses one rule on one line. A token line beginning `-` declares a
+longer literal the token is expected inside, so the bare token still fires
+everywhere else — including elsewhere on the same line.
 
 That used to read "either repository", which was not true of anything the tool
 did — and the first vault scan run after fixing it found a real over-claim in
