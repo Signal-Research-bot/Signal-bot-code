@@ -291,7 +291,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         "window": window_id,
         "messages": len(messages),
         "transcript": builder.stats.as_dict(),
-        "cheap_attempted": 0, "cheap_resolved": 0, "escalated": 0,
+        "cheap_attempted": 0, "cheap_resolved": 0, "escalated": 0, "link_leads": 0,
         "written": 0, "failed": 0, "ungrounded_dropped": 0, "refusals": 0,
         "unsourced_dropped": 0, "not_written_collision": 0,
         "pages_created": 0, "pages_updated": 0, "dashboard_updated": False,
@@ -395,12 +395,36 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
             except (Refusal, ValueError) as exc:
                 log.warning("cheap pass failed", extra={"error": type(exc).__name__})
 
+            # Ground truth again, and the same principle as the citation
+            # allowlist: a URL is fetchable only if it verifiably appeared in
+            # the redacted transcript, exactly as written. The model echoes
+            # `urls` through two stages and is not trusted with either -- a
+            # link it invented, completed or tidied up simply fails this
+            # membership test and the task is researched without it.
+            #
+            # `[` excludes the redacted forms: a URL whose path held a UUID
+            # comes through as ".../[id]/...", which is not a real address. That
+            # loses a small number of links, skewed towards private workspace
+            # ones, and the alternative is un-redacting an identifier to fetch
+            # it.
+            task_urls = tuple(
+                u.strip() for u in (task.get("urls") or [])
+                if isinstance(u, str) and u.strip() in builder.kept_urls_set
+                and "[" not in u
+            )
+            if task_urls:
+                stats["link_leads"] += 1
+
             escalate, why = should_escalate(task, cheap)
             if escalate:
                 stats["escalated"] += 1
                 notes = json.dumps(cheap) if cheap else ""
                 research_text, _ = client.send(
-                    **stages.deep_research(question, why, notes)
+                    **stages.deep_research(
+                        question, why, notes,
+                        urls=task_urls if cfg.fetch_max_uses else (),
+                        fetch_max_uses=cfg.fetch_max_uses,
+                    )
                 )
                 # Without this the deep stage's own citations were never
                 # harvested, so an escalated task had every source stripped.
@@ -558,6 +582,7 @@ def _finish(cache, window_id, messages, cfg, client, stats, vault, entries=(),
         input_tokens=client.usage.input_tokens,
         output_tokens=client.usage.output_tokens,
         searches=client.usage.searches,
+        fetches=client.usage.fetches,
     )
     record_run(cfg.metrics_path, stats)
     log.info("window complete", extra=stats)

@@ -76,6 +76,10 @@ class FakeClient:
     # the machine -- a test that only checks the return value cannot tell
     # whether redaction ran.
     last_request: dict[str, Any] = field(default_factory=dict)
+    # Every request, keyed by stage. `last_request` is whatever the window
+    # happened to end on, which is never the stage under test when the stage is
+    # not the last one.
+    requests: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def _stage_of(self, request: dict) -> str:
         """Identify the stage from its prompt.
@@ -95,6 +99,7 @@ class FakeClient:
         stage = self._stage_of(request)
         self.calls.append(stage)
         self.last_request = request
+        self.requests[stage] = request
         self.last_retrieved_urls = set(self.search_results.get(stage, set()))
         value = self.responses.get(stage)
         if isinstance(value, Exception):
@@ -122,6 +127,7 @@ def cfg_for(tmp_path: Path, **kw) -> Config:
         metrics_path=tmp_path / "metrics.jsonl",
         kb_dir=tmp_path / "vault", foreign_vault_dir=None,
         log_level="CRITICAL", max_tasks_per_window=4, max_updates_per_window=2,
+        fetch_max_uses=3,
         worth_threshold=0.6,
         notify=False,
         research_domain='Financial investigation of the crypto sector.',
@@ -163,15 +169,16 @@ def install(monkeypatch, client: FakeClient) -> None:
     monkeypatch.setattr(batch_mod, "AnthropicTransport", lambda *a, **k: None)
 
 
-def extracted(n=1):
+def extracted(n=1, urls=()):
     return {"tasks": [{"question": f"q{i}", "raised_by": "Participant A",
-                       "context": "c", "kind": "factual"} for i in range(n)]}
+                       "context": "c", "kind": "factual", "urls": list(urls)}
+                      for i in range(n)]}
 
 
-def triaged(n=1, worth=0.9, difficulty="low", in_scope=True):
+def triaged(n=1, worth=0.9, difficulty="low", in_scope=True, urls=()):
     return {"tasks": [{"question": f"q{i}", "in_scope": in_scope, "worth": worth,
                        "difficulty": difficulty, "duplicate_of": None,
-                       "rationale": "r"} for i in range(n)]}
+                       "urls": list(urls), "rationale": "r"} for i in range(n)]}
 
 
 def cheap(resolved=True, urls=("https://a.example",)):
@@ -569,7 +576,7 @@ def test_a_record_that_could_not_be_filed_leaves_its_question_behind(env, monkey
 # --- one page per topic, not per run ------------------------------------------
 
 
-def _seed(env):
+def _seed(env, body="more on the reserves question"):
     """One fresh unprocessed message.
 
     A window consumes what it processes, so without this a second run finds an
@@ -582,7 +589,7 @@ def _seed(env):
     cache.add(ParsedMessage(
         kind=Kind.MESSAGE, group_id=GROUP, source=ALICE,
         timestamp_ms=ts - (ts % (15 * 60 * 1000)),
-        body="more on the reserves question", raw_timestamp_ms=ts,
+        body=body, raw_timestamp_ms=ts,
     ))
     cache.close()
 
@@ -807,6 +814,95 @@ def test_a_page_links_to_another_topic_that_shares_its_tags(env, monkeypatch):
     assert 'related: ["[[Reserves attestation scope]]"]' in later.read_text(
         encoding="utf-8"
     )
+
+
+# --- links the group posted ---------------------------------------------------
+#
+# The rule these defend: a link is fetchable only if it verifiably appeared in
+# the REDACTED transcript, character for character. The model carries `urls`
+# through two stages and is trusted with neither -- what it echoes is checked
+# against the transcript builder's own record, so an invented, completed or
+# tidied-up URL is unfetchable by construction rather than by good behaviour.
+
+LINK = "https://www.sec.gov/Archives/edgar/filing.htm"
+
+
+def _link_window(env, monkeypatch, urls, *, posted=LINK, **cfg_kw):
+    """A window where a link was posted and triage claims a lead depends on it.
+
+    difficulty="high" so the task escalates: the fetch tool only ever goes to
+    the deep stage, so a window that never escalates proves nothing.
+    """
+    _seed(env, f"worth reading: {posted}")
+    client = FakeClient(
+        {"extract": extracted(urls=[posted]),
+         "triage": triaged(difficulty="high", urls=urls),
+         "cheap": cheap(), "format": record()},
+        search_results={"cheap": {"https://a.example"}},
+    )
+    install(monkeypatch, client)
+    batch_mod.run(cfg_for(env, **cfg_kw))
+    return client
+
+
+def _deep_prompt(client) -> str:
+    return str(client.requests["deep"]["messages"][0]["content"])
+
+
+def _has_fetch(client) -> bool:
+    return any(t["name"] == "web_fetch" for t in client.requests["deep"]["tools"])
+
+
+def test_a_link_the_group_posted_reaches_the_deep_stage(env, monkeypatch):
+    client = _link_window(env, monkeypatch, urls=[LINK])
+    assert LINK in _deep_prompt(client)
+    assert _has_fetch(client)
+    assert '"link_leads": 1' in (env / "metrics.jsonl").read_text(encoding="utf-8")
+
+
+def test_a_url_the_model_invented_is_never_fetched(env, monkeypatch):
+    """It never appeared in the transcript, so nothing may act on it."""
+    client = _link_window(env, monkeypatch, urls=["https://fake.example/made-up"])
+    assert "fake.example" not in _deep_prompt(client)
+    assert not _has_fetch(client)
+
+
+def test_a_url_the_model_tidied_up_is_no_longer_the_url_that_was_posted(env, monkeypatch):
+    """Adding a tracking parameter, dropping a trailing slash or completing a
+    shortened link all produce a different address. Exact match, or nothing."""
+    client = _link_window(env, monkeypatch, urls=[LINK + "?utm_source=chat"])
+    assert "utm_source" not in _deep_prompt(client)
+    assert not _has_fetch(client)
+
+
+def test_a_link_whose_path_was_redacted_is_never_fetched(env, monkeypatch):
+    """A URL carrying an account id comes through as ".../[id]/...", which is
+    not a real address. Fetching it would mean un-redacting the identifier."""
+    doc = str(uuid.UUID(int=0xD0C))
+    client = _link_window(
+        env, monkeypatch,
+        urls=["https://app.example/doc/[id]/view"],
+        posted=f"https://app.example/doc/{doc}/view",
+    )
+    assert "app.example" not in _deep_prompt(client)
+    assert not _has_fetch(client)
+
+
+def test_the_fetch_kill_switch_works_end_to_end(env, monkeypatch):
+    client = _link_window(env, monkeypatch, urls=[LINK], fetch_max_uses=0)
+    assert LINK not in _deep_prompt(client)
+    assert not _has_fetch(client)
+
+
+@pytest.mark.parametrize("stage", ["extract", "triage", "format"])
+def test_no_tool_reaches_a_stage_that_only_reads_what_it_was_given(
+    env, monkeypatch, stage
+):
+    """True today because structured_request never adds tools, which is an
+    accident of construction rather than a stated rule. Stated here: the stages
+    that see raw transcript must not be able to reach the network themselves."""
+    client = _link_window(env, monkeypatch, urls=[LINK])
+    assert "tools" not in client.requests[stage]
 
 
 # --- learning handles by watching --------------------------------------------

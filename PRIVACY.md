@@ -58,10 +58,34 @@ The consequences you should know about:
 Links and cryptocurrency addresses are **not** removed, because in this group
 they are usually the subject of the discussion rather than anything personal.
 Links to personal profiles (LinkedIn, Telegram, payment handles, and similar)
-*are* removed. The system counts how often it keeps a link so the operator can
-check that this judgement is holding up.
+*are* removed — whether or not they are written with the `https://` on the
+front. The system counts how often it keeps a link so the operator can check
+that this judgement is holding up.
 
 If you think that trade-off is wrong, say so — it is one line of configuration.
+
+## Links you post may be opened and read
+
+If you post a link and someone makes a claim about what it says, the research
+model may **retrieve that page and read it** in order to check the claim. Three
+things bound that, and they are enforced in code rather than promised:
+
+- Only links that survived the removal above, exactly as you typed them. A
+  personal-profile link is never fetchable, because it never leaves this
+  machine in the first place. Neither is a link the model got slightly wrong,
+  or invented — the address is checked character-for-character against what was
+  actually posted before anything is retrieved.
+- A small number of pages per question, with a size cap on each.
+- Nothing is sent to the site you linked beyond an ordinary request for the
+  page. Nothing about the group, the conversation, or who posted it goes with
+  it.
+
+The page's contents are treated as a claim to be verified, not as fact, and
+they pass back through the same filter as everything else before reaching the
+archive.
+
+This can be switched off entirely by the operator, in one line of
+configuration, without changing anything else.
 
 ## What is never processed at all
 

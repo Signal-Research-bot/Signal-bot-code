@@ -48,6 +48,14 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 WEB_SEARCH_TOOL = "web_search_20260209"
 WEB_SEARCH_TOOL_BASIC = "web_search_20250305"
 DYNAMIC_FILTER_MODELS = frozenset({OPUS, SONNET})
+
+# Same model gate as the dynamic-filtering SEARCH tool, and there is no basic
+# fallback in this codebase: a stage that cannot have this simply does not get
+# it. Which stage gets it is decided by the caller passing `fetch=`, never
+# inferred from the model -- the two happen to coincide today, and a rule that
+# is true by coincidence is the kind that breaks silently when one of them
+# moves.
+WEB_FETCH_TOOL = "web_fetch_20260209"
 # Models that accept output_config.effort. Haiku 4.5 does not.
 EFFORT_MODELS = frozenset({OPUS, SONNET})
 
@@ -97,11 +105,13 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     searches: int = 0
+    fetches: int = 0
 
     def add(self, other: "Usage") -> None:
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
         self.searches += other.searches
+        self.fetches += other.fetches
 
 
 @dataclass
@@ -188,14 +198,28 @@ def retrieved_urls(response: Any) -> set[str]:
     """
     urls: set[str] = set()
     for block in getattr(response, "content", None) or []:
-        if getattr(block, "type", "") != "web_search_tool_result":
-            continue
+        kind = getattr(block, "type", "")
         content = getattr(block, "content", None)
-        # An error block has a single object here, not a list of results.
-        if not isinstance(content, (list, tuple)):
-            continue
-        for result in content:
-            url = getattr(result, "url", None)
+
+        if kind == "web_search_tool_result":
+            # An error block has a single object here, not a list of results.
+            if not isinstance(content, (list, tuple)):
+                continue
+            for result in content:
+                url = getattr(result, "url", None)
+                if url:
+                    urls.add(url.strip())
+
+        elif kind == "web_fetch_tool_result":
+            # A fetch result's content is an OBJECT, not a list -- so the shape
+            # check above cannot be reused, and more importantly a *failed*
+            # fetch is also an object. Discriminating on shape would harvest the
+            # error block's url and launder a page nobody retrieved into the
+            # citation allowlist, which is the exact circularity this function
+            # exists to prevent. The type tag is what tells them apart.
+            if getattr(content, "type", "") != "web_fetch_result":
+                continue
+            url = getattr(content, "url", None)
             if url:
                 urls.add(url.strip())
     return urls
@@ -203,14 +227,20 @@ def retrieved_urls(response: Any) -> set[str]:
 
 def _usage_of(response: Any) -> Usage:
     raw = getattr(response, "usage", None)
-    searches = 0
+    searches = fetches = 0
     server = getattr(raw, "server_tool_use", None)
     if server is not None:
+        # Defaulted rather than assumed present: a response from a stage that
+        # carried no fetch tool has no such counter, and the whole point of
+        # recording it is that a run which fetched nothing reads as zero rather
+        # than as an error.
         searches = getattr(server, "web_search_requests", 0) or 0
+        fetches = getattr(server, "web_fetch_requests", 0) or 0
     return Usage(
         input_tokens=getattr(raw, "input_tokens", 0) or 0,
         output_tokens=getattr(raw, "output_tokens", 0) or 0,
         searches=searches,
+        fetches=fetches,
     )
 
 
@@ -248,13 +278,22 @@ def search_request(
     *, model: str, system: str, user: str, max_uses: int,
     schema: dict[str, Any] | None = None, effort: str = "high",
     max_tokens: int = 16000, adaptive_thinking: bool = False,
-    with_fallbacks: bool = False,
+    with_fallbacks: bool = False, fetch: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """A web-search request.
+    """A web-search request, optionally able to read specific pages too.
 
     `schema` is deliberately optional and unset for the deep-research stage:
     citations and structured outputs have a documented conflict, so that stage
     returns free text and a separate cheap call turns it into a record.
+
+    `fetch` is an explicit parameter and not something this function decides
+    from the model. `web_fetch_20260209` has the same model gate as the
+    dynamic-filtering search tool, so inferring it from `DYNAMIC_FILTER_MODELS`
+    would work today and would be wrong in principle: whether a stage is allowed
+    to read a link chosen by chat participants is a policy decision, not a
+    capability lookup, and the two would part company the moment either moved.
+    Passed as a whole tool block so the caller owns `max_uses`, the content cap
+    and the blocked-domain list.
     """
     request: dict[str, Any] = {
         "model": model,
@@ -270,6 +309,10 @@ def search_request(
         ],
         "output_config": {},
     }
+    # Appended, so search stays tools[0]. Several tests index it positionally,
+    # and a silent reorder would move what they assert on rather than fail.
+    if fetch is not None:
+        request["tools"].append(fetch)
     # `effort` is not universal either -- sending it to a model that does not
     # take it is a 400, not a silently ignored field.
     if model in EFFORT_MODELS:

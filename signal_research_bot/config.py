@@ -87,6 +87,7 @@ class Config:
     log_level: str
     max_tasks_per_window: int
     max_updates_per_window: int
+    fetch_max_uses: int
     worth_threshold: float
     notify: bool
     research_domain: str
@@ -114,6 +115,11 @@ class Config:
             log_level=os.environ.get("SRB_LOG_LEVEL", "INFO").upper(),
             max_tasks_per_window=int(os.environ.get("SRB_MAX_TASKS_PER_WINDOW", "4")),
             max_updates_per_window=int(os.environ.get("SRB_MAX_UPDATES_PER_WINDOW", "2")),
+            # Pages the deep stage may retrieve per task, from links the group
+            # actually posted. 0 is the kill switch: no fetch tool is sent and
+            # the links are not even named in the prompt, so the behaviour can
+            # be withdrawn without a deploy.
+            fetch_max_uses=int(os.environ.get("SRB_FETCH_MAX_USES", "3")),
             worth_threshold=float(os.environ.get("SRB_WORTH_THRESHOLD", "0.6")),
             notify=os.environ.get("SRB_NOTIFY", "false").lower() in {"1", "true", "yes"},
             research_domain=os.environ.get("SRB_RESEARCH_DOMAIN", DEFAULT_DOMAIN).strip(),

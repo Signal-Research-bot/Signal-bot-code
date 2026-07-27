@@ -59,11 +59,21 @@ EXTRACT = _obj(
                         "type": "string",
                         "description": "How the lead arose in conversation. "
                         "'claim' and 'entity' matter as much as 'question' -- "
-                        "most real leads are not phrased as questions.",
-                        "enum": ["question", "claim", "entity", "disagreement"],
+                        "most real leads are not phrased as questions. 'link' "
+                        "is a shared link offered as evidence, where the lead "
+                        "is to verify what the linked material actually says.",
+                        "enum": ["question", "claim", "entity", "disagreement", "link"],
+                    },
+                    "urls": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "URLs copied VERBATIM from the transcript "
+                        "that this lead depends on. Empty when none. Never "
+                        "invent, complete or modify a URL -- a link that is not "
+                        "character-for-character what was posted is discarded.",
                     },
                 },
-                ["question", "raised_by", "context", "kind"],
+                ["question", "raised_by", "context", "kind", "urls"],
             ),
         }
     },
@@ -111,10 +121,18 @@ TRIAGE = _obj(
                         "contradicts its recorded finding, or a source it does "
                         "not cite. Null is the normal answer.",
                     },
+                    "urls": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Carry through the candidate's urls "
+                        "unchanged. Do not add, drop, shorten or correct any of "
+                        "them; anything altered stops matching what was actually "
+                        "posted and is discarded.",
+                    },
                     "rationale": {"type": "string"},
                 },
                 ["question", "in_scope", "worth", "difficulty", "duplicate_of",
-                 "topic_key", "new_information", "rationale"],
+                 "topic_key", "new_information", "urls", "rationale"],
             ),
         }
     },
