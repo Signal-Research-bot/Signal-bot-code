@@ -35,6 +35,7 @@ from .identity import (
     load_or_create_key,
     vet_auto_handles,
 )
+from .kb.dashboard import write_dashboard
 from .kb.render import depersonalise, normalise_topic_key, render, slug, title_for
 from .kb.state import VaultIndex, content_hash, merge, state_from_record
 from .kb.writer import VaultError, VaultWriter, git_commit
@@ -293,7 +294,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         "cheap_attempted": 0, "cheap_resolved": 0, "escalated": 0,
         "written": 0, "failed": 0, "ungrounded_dropped": 0, "refusals": 0,
         "unsourced_dropped": 0, "not_written_collision": 0,
-        "pages_created": 0, "pages_updated": 0,
+        "pages_created": 0, "pages_updated": 0, "dashboard_updated": False,
         "updates_refused_hand_edited": 0, "legacy_bump_skipped": 0,
         # What the roster actually covered. Recorded because an empty roster no
         # longer refuses to run: without this, a window with no deny-list at all
@@ -314,7 +315,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         extracted, _ = client.send_json(**stages.extract(transcript, cfg.research_domain))
         candidates = extracted.get("tasks") or []
         if not candidates:
-            _finish(cache, window_id, messages, cfg, client, stats, vault)
+            _finish(cache, window_id, messages, cfg, client, stats, vault, index=index)
             return 0
 
         digest = vault.digest() if vault else "(archive is empty)"
@@ -328,7 +329,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
             "egress blocked the window; quarantined and skipped",
             extra={"rule": exc.rule, "window": window_id},
         )
-        _finish(cache, window_id, messages, cfg, client, stats, vault)
+        _finish(cache, window_id, messages, cfg, client, stats, vault, index=index)
         return 1
     except (Refusal, ValueError) as exc:
         # A refusal or unparseable structured output on stage 1/2 is transient
@@ -481,7 +482,7 @@ def run(cfg: Config, *, dry_run: bool = False) -> int:
         )
     _finish(
         cache, window_id, messages, cfg, client, stats, vault, written_entries,
-        log_lines=log_lines, today=today,
+        log_lines=log_lines, today=today, index=index,
     )
     return 0
 
@@ -525,10 +526,24 @@ def _write_changelog(vault: VaultWriter, lines: list[str], today: str) -> None:
 
 
 def _finish(cache, window_id, messages, cfg, client, stats, vault, entries=(),
-            *, log_lines=(), today="") -> None:
+            *, log_lines=(), today="", index=None) -> None:
     if vault:
         _write_changelog(vault, list(log_lines), today)
-    if vault and (stats.get("written") or stats.get("pages_updated")):
+    if vault and index is not None:
+        # Regenerated on every run, including runs that wrote nothing: it is a
+        # projection of the index, so a vault whose sidecars changed by any
+        # other route (a repair, a hand reconciliation) converges here rather
+        # than staying stale until the next window that happens to research
+        # something. Byte-compared inside, so an unchanged archive costs no
+        # commit.
+        try:
+            stats["dashboard_updated"] = write_dashboard(vault, index)
+        except (VaultError, OSError) as exc:
+            # Never fatal, same reasoning as the changelog: the research is
+            # already filed, and the whole page is rebuilt from scratch next run.
+            log.warning("dashboard not written", extra={"error": type(exc).__name__})
+    if vault and (stats.get("written") or stats.get("pages_updated")
+                  or stats.get("dashboard_updated")):
         git_commit(
             vault.vault_dir,
             f"research: {stats['written']} entries from window {window_id}",

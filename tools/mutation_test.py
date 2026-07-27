@@ -44,12 +44,13 @@ BATCH = REPO_ROOT / "signal_research_bot" / "batch.py"
 STATE = REPO_ROOT / "signal_research_bot" / "kb" / "state.py"
 GATE = REPO_ROOT / "signal_research_bot" / "gate.py"
 REPAIR = REPO_ROOT / "signal_research_bot" / "kb" / "repair.py"
+DASHBOARD = REPO_ROOT / "signal_research_bot" / "kb" / "dashboard.py"
 SUITE = (
     "tests/test_egress.py tests/test_client.py tests/test_transcript.py "
     "tests/test_envelope.py tests/test_redact.py tests/test_kb.py "
     "tests/test_batch.py tests/test_identity.py tests/test_receiver.py "
     "tests/test_importer.py tests/test_kb_state.py tests/test_kb_migration.py "
-    "tests/test_gate.py tests/test_kb_repair.py"
+    "tests/test_gate.py tests/test_kb_repair.py tests/test_kb_dashboard.py"
 )
 
 
@@ -329,6 +330,31 @@ MUTATIONS: tuple[Mutation, ...] = (
         "        index.stage(replace(index.get(p.topic_key), tags=p.tags, **p.facts))",
         "        index.stage(replace(index.get(p.topic_key), tags=(), **p.facts))",
         REPAIR,
+    ),
+    # --- the index page: complete, portable, and quiet ------------------------
+    Mutation(
+        "the dashboard churns a commit on every window",
+        '    if path.exists() and path.read_text(encoding="utf-8") == markdown:',
+        "    if False:",
+        DASHBOARD,
+    ),
+    Mutation(
+        "the dashboard is written where triage will read it back",
+        'DASHBOARD_SUBDIR = "Dashboard"',
+        'DASHBOARD_SUBDIR = "Research Log"',
+        DASHBOARD,
+    ),
+    Mutation(
+        "the index page bypasses depersonalisation",
+        '    return depersonalise("\\n".join(parts))',
+        '    return "\\n".join(parts)',
+        DASHBOARD,
+    ),
+    Mutation(
+        "a status the display order does not know is dropped from the index",
+        "    order = list(_DISPLAY_ORDER) + sorted(set(by_status) - set(_DISPLAY_ORDER))",
+        "    order = list(_DISPLAY_ORDER)",
+        DASHBOARD,
     ),
     # --- keeping participants out of the research itself ---------------------
     #

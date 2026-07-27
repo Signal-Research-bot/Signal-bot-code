@@ -693,6 +693,45 @@ def test_the_changelog_is_not_offered_to_triage_as_an_archive_entry(env, monkeyp
     assert "Changelog" not in triage_prompt
 
 
+def _dashboard(env):
+    return env / "vault" / "Dashboard" / "Research Overview.md"
+
+
+def test_every_run_regenerates_the_dashboard(env, monkeypatch):
+    """One page from which every topic is reachable, readable on a git host
+    without Obsidian and without Dataview."""
+    _run_window(env, monkeypatch)
+    assert f"[[{_pages(env)[0].stem}]]" in _dashboard(env).read_text(encoding="utf-8")
+
+
+def test_the_dashboard_lives_outside_the_directory_triage_reads(env, monkeypatch):
+    """In Research Log/ it would be offered to triage as an archive entry, and
+    real research would be deduped against the archive's own index page."""
+    _run_window(env, monkeypatch)
+    assert _dashboard(env).exists()
+    assert not list((env / "vault" / "Research Log").glob("Research Overview*"))
+
+
+def test_an_unchanged_archive_does_not_rewrite_the_dashboard(env, monkeypatch):
+    """It is regenerated on every run, so without the byte-compare the batch
+    would commit and push a revision of it on every window and the vault history
+    would stop being a record of what changed."""
+    _run_window(env, monkeypatch)
+    _run_window(env, monkeypatch)
+    lines = (env / "metrics.jsonl").read_text(encoding="utf-8").strip().split("\n")
+    assert '"dashboard_updated": true' in lines[0]
+    assert '"dashboard_updated": false' in lines[-1]
+
+
+def test_a_new_topic_does_rewrite_the_dashboard(env, monkeypatch):
+    _run_window(env, monkeypatch)
+    _run_window(env, monkeypatch, dict(
+        record(), title="A second subject", topic_key="second-subject"))
+    page = _dashboard(env).read_text(encoding="utf-8")
+    assert "[[A second subject]]" in page
+    assert "| **total** | **2** |" in page
+
+
 def test_no_file_the_batch_wrote_contains_a_speaker_label(env, monkeypatch):
     """The catch-all. Every page and changelog line the run produced is fed back
     through depersonalise, which is idempotent -- so any text that skipped the
