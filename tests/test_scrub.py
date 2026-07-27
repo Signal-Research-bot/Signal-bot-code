@@ -179,6 +179,88 @@ def test_findings_never_echo_the_matched_secret(tmp_path):
         assert "jordan" not in name.lower().replace("token:jor***", "")
 
 
+# --- exemptions: a phrase a token is expected inside ---------------------------
+#
+# A first name is both genuinely identifying for the operator and a genuinely
+# common word in a vault about named people. In the live vault the operator's
+# first name collides with an investigation subject's on 61 pages -- and a gate
+# that fires 61 times for one reason is a gate people learn to walk around,
+# which is how the one real finding hiding among them gets published.
+
+
+def _tokens(monkeypatch, text: str):
+    monkeypatch.setenv("SCRUB_TOKENS", text)
+    from tools.scrub_check import load_tokens
+
+    return load_tokens()
+
+
+def test_a_leading_dash_declares_a_phrase_the_token_is_expected_inside(monkeypatch):
+    tokens, exemptions = _tokens(monkeypatch, "jordan\n-Jordan Peak Mining\n")
+    assert tokens == ["jordan"]
+    assert exemptions == ["Jordan Peak Mining"]
+
+
+def test_a_token_inside_its_expected_phrase_is_not_a_finding(tmp_path, monkeypatch):
+    from tools.scrub_check import scan, token_rules
+
+    path = tmp_path / "page.md"
+    path.write_text("Research on Jordan Peak Mining Ltd.", encoding="utf-8")
+    findings, _ = scan([path], token_rules(["jordan"]), ["Jordan Peak Mining"])
+    assert findings == []
+
+
+def test_the_bare_token_still_fires_everywhere_else(tmp_path):
+    """An exemption exempts a phrase, not a file. This is what makes it narrower
+    than an allowlist entry in the way that matters."""
+    from tools.scrub_check import scan, token_rules
+
+    path = tmp_path / "page.md"
+    path.write_text(
+        "Jordan Peak Mining Ltd was reviewed by Jordan.", encoding="utf-8"
+    )
+    findings, _ = scan([path], token_rules(["jordan"]), ["Jordan Peak Mining"])
+    assert len(findings) == 1, "the bare occurrence went out behind the exemption"
+
+
+def test_a_file_of_only_exemptions_still_refuses_to_run(monkeypatch):
+    """Fail-closed is not negotiable: an exemption is not a token."""
+    monkeypatch.setenv("SCRUB_TOKENS", "-Jordan Peak Mining\n")
+    from tools.scrub_check import load_tokens
+
+    with pytest.raises(SystemExit):
+        load_tokens()
+
+
+def test_the_vault_scan_reports_only_what_would_be_published(tmp_path):
+    """Scanning ignored files reports on a plugin's node_modules -- hundreds of
+    files of third-party JavaScript that will never be committed -- and buries
+    the findings in content a person actually wrote. A gate that reports
+    hundreds of findings nobody can act on is a gate that gets overridden."""
+    from tools.scrub_check import _publishable
+
+    vault = tmp_path / "vault"
+    (vault / "node_modules").mkdir(parents=True)
+    (vault / "node_modules" / "dep.js").write_text("x", encoding="utf-8")
+    (vault / "page.md").write_text("y", encoding="utf-8")
+    (vault / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(vault)], check=True)
+
+    names = {p.name for p in _publishable(vault)}
+    assert "page.md" in names
+    assert "dep.js" not in names, "an ignored file was reported on"
+
+
+def test_a_vault_that_is_not_a_repository_is_scanned_whole(tmp_path):
+    """Nothing to ask git yet, so nothing may be assumed excluded."""
+    from tools.scrub_check import _publishable
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "page.md").write_text("y", encoding="utf-8")
+    assert [p.name for p in _publishable(vault)] == ["page.md"]
+
+
 # --- the checker actually runs -----------------------------------------------
 
 

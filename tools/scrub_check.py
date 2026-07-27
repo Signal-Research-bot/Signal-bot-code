@@ -131,10 +131,16 @@ def _normalise(text: str) -> str:
     return unicodedata.normalize("NFKC", text).replace("\\", "/")
 
 
-def load_tokens() -> list[str]:
-    """Load sensitive literals from the environment or the gitignored file.
+def load_tokens() -> tuple[list[str], list[str]]:
+    """Load sensitive literals, and the phrases they are expected inside.
 
-    Fails closed: no tokens available is an error, never a silent pass.
+    Returns (tokens, exemptions). A line beginning "-" is an exemption: a longer
+    literal in which a token is not a leak. See the note in the parser below for
+    why that is not an allowlist in disguise.
+
+    Fails closed: no tokens available is an error, never a silent pass. An
+    exemption alone is not a token, so a file of nothing but exemptions still
+    refuses to run.
     """
     def _display(p: Path) -> str:
         try:
@@ -159,14 +165,30 @@ def load_tokens() -> list[str]:
             f"  See .env.example for the expected format."
         )
 
-    tokens = [
-        _normalise(ln.strip())
-        for ln in lines
-        if ln.strip() and not ln.lstrip().startswith("#")
-    ]
+    tokens, exemptions = [], []
+    for ln in lines:
+        text = ln.strip()
+        if not text or text.startswith("#"):
+            continue
+        # A leading "-" declares a longer literal the token is EXPECTED inside.
+        #
+        # This exists because a first name is both genuinely identifying for the
+        # operator and a genuinely common word in a vault about named people. In
+        # the live vault the operator's first name collides with the first name
+        # of an investigation subject on 61 pages, and a gate that fires 61 times
+        # for one reason is a gate people learn to walk around -- which is how
+        # the ONE real finding hiding among them gets published.
+        #
+        # An exemption is narrower than an allowlist entry in the way that
+        # matters: it exempts a phrase, not a file. The bare token still fires
+        # everywhere else in every file, including in the same paragraph.
+        if text.startswith("-") and len(text) > 1:
+            exemptions.append(_normalise(text[1:].strip()))
+        else:
+            tokens.append(_normalise(text))
     if not tokens:
         sys.exit(f"scrub_check: {source} contained no tokens. Refusing to run.")
-    return tokens
+    return tokens, [e for e in exemptions if e]
 
 
 def token_rules(tokens: list[str]) -> list[Rule]:
@@ -238,10 +260,62 @@ NON_UTF8_HINT = (
 UNREADABLE_HINT = "Could not be read. Fix permissions, or remove it from the repo."
 
 
+def _publishable(vault: Path) -> list[Path]:
+    """The files in a vault that would actually be published.
+
+    Once the vault is a git repository this is exactly what git would carry:
+    tracked files, plus untracked ones that .gitignore does not exclude. Before
+    it is a repository there is nothing to ask, so everything is scanned.
+
+    The distinction is the difference between a usable gate and an unusable one.
+    Scanning ignored files reports on a plugin's node_modules -- 940 files, 45 MB
+    of third-party JavaScript that will never be committed -- and buries the
+    handful of findings in content a person actually wrote. A gate that reports
+    hundreds of findings nobody can act on is a gate that gets overridden, which
+    is how the one real finding among them gets published.
+    """
+    probe = subprocess.run(
+        ["git", "-C", str(vault), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True, check=False,
+    )
+    if probe.returncode == 0 and probe.stdout.strip() == "true":
+        listed: set[str] = set()
+        for args in (["ls-files"], ["ls-files", "--others", "--exclude-standard"]):
+            out = subprocess.run(
+                ["git", "-C", str(vault), *args],
+                capture_output=True, text=True, check=False,
+            )
+            listed.update(ln for ln in out.stdout.splitlines() if ln.strip())
+        return sorted(
+            p for p in (vault / name for name in listed)
+            if p.is_file() and p.suffix.lower() != ".png"
+        )
+
+    print(
+        f"scrub_check: NOTE -- {vault.name} is not a git repository, so every "
+        f"file in it is being scanned. Once it has a .gitignore and a git init, "
+        f"this reports only what would actually be published."
+    )
+    return sorted(
+        p for p in vault.rglob("*")
+        if p.is_file() and ".git" not in p.parts and p.suffix.lower() != ".png"
+    )
+
+
+def _exempt_spans(line: str, exemptions: list[str]) -> list[tuple[int, int]]:
+    """Character ranges on this line where a token is expected, not leaked."""
+    spans = []
+    for phrase in exemptions:
+        for m in re.finditer(re.escape(phrase), line, re.I):
+            spans.append((m.start(), m.end()))
+    return spans
+
+
 def scan(
-    paths: list[Path], rules: list[Rule]
+    paths: list[Path], rules: list[Rule], exemptions: list[str] | None = None
 ) -> tuple[list[tuple[str, int, str, str]], int]:
     """Return (findings, pragma_count). Pragma count is reported for auditing."""
+    exemptions = exemptions or []
     findings = []
     pragmas = 0
     for path in paths:
@@ -276,11 +350,18 @@ def scan(
             if PRAGMA.search(line):
                 pragmas += 1
             allowed = _suppressed(lines, idx)
+            spans = _exempt_spans(line, exemptions) if exemptions else []
             for rule in rules:
                 if rule.name.lower() in allowed:
                     continue
-                if rule.pattern.search(line):
+                # Every match, not just the first. A line can carry a token
+                # inside an expected phrase AND a bare one, and reporting only
+                # the first would let the bare one through behind the exemption.
+                for m in rule.pattern.finditer(line):
+                    if any(s <= m.start() and m.end() <= e for s, e in spans):
+                        continue
                     findings.append((rel, idx + 1, rule.name, rule.hint))
+                    break
     return findings, pragmas
 
 
@@ -312,8 +393,10 @@ def main() -> int:
             "usernames and hostnames are NOT being checked."
         )
         rules = list(STRUCTURAL_RULES)
+        exemptions: list[str] = []
     else:
-        rules = STRUCTURAL_RULES + token_rules(load_tokens())
+        tokens, exemptions = load_tokens()
+        rules = STRUCTURAL_RULES + token_rules(tokens)
     paths = target_files("all" if args.all else "staged", args.paths)
 
     if args.vault:
@@ -321,10 +404,7 @@ def main() -> int:
         if not vault.is_dir():
             print(f"scrub_check: --vault {vault.name} is not a directory", file=sys.stderr)
             return 2
-        vault_files = sorted(
-            p for p in vault.rglob("*")
-            if p.is_file() and ".git" not in p.parts and p.suffix.lower() != ".png"
-        )
+        vault_files = _publishable(vault)
         if not vault_files:
             print(f"scrub_check: WARNING -- --vault {vault.name} contains no files.")
         paths = paths + vault_files
@@ -333,7 +413,7 @@ def main() -> int:
         print("scrub_check: nothing to scan.")
         return 0
 
-    findings, pragmas = scan(paths, rules)
+    findings, pragmas = scan(paths, rules, exemptions)
     if not findings:
         note = f", {pragmas} scrub-ok pragma(s) in effect" if pragmas else ""
         print(f"scrub_check: clean ({len(paths)} file(s) scanned{note}).")
