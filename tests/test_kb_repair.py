@@ -219,6 +219,33 @@ def test_related_links_are_computed_between_pages_that_share_tags(vault):
     assert f'related: ["[[{STAKE}]]"]' in reserves
 
 
+def test_links_already_on_a_page_are_never_deleted(vault):
+    """Computed tag-overlap links are one source of links on a page; a link a
+    person put there, or a migration added to connect this page to a
+    hand-written one, is another -- and repair cannot tell them apart. On a page
+    whose whole purpose is to be connected, replacing is data loss."""
+    path = vault / f"{QUANTUM}.md"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "related: []", 'related: ["[[Company - Somebody Else]]"]'
+        ),
+        encoding="utf-8",
+    )
+    _resync(vault, path)
+    repair(vault)
+    assert "[[Company - Somebody Else]]" in path.read_text(encoding="utf-8")
+
+
+def test_a_computed_link_is_not_added_twice(vault):
+    repair(vault)
+    text = (vault / f"{STAKE}.md").read_text(encoding="utf-8")
+    assert text.count(f"[[{RESERVES}]]") == 1
+    repair(vault)
+    assert (vault / f"{STAKE}.md").read_text(encoding="utf-8").count(
+        f"[[{RESERVES}]]"
+    ) == 1, "a second run duplicated the link"
+
+
 def test_a_page_sharing_no_tags_links_to_nothing(vault):
     """The counterweight: a link every page has is not a link."""
     repair(vault)

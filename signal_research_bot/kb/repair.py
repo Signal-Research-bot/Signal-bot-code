@@ -130,6 +130,19 @@ def _parse_tags(value: str) -> tuple[str, ...] | None:
     return tuple(out)
 
 
+def _parse_links(value: str) -> tuple[str, ...]:
+    """Wikilinks already on a `related:` line, in the exact shape we write.
+
+    Anything else reads as no links rather than as an error: this feeds a union,
+    so misreading a shape we do not recognise costs a duplicate at worst, never
+    a deletion.
+    """
+    value = value.strip()
+    if not value.startswith('["') or not value.endswith('"]'):
+        return ()
+    return tuple(item for item in value[2:-2].split('", "') if item)
+
+
 def _carries_our_key(lines: list[str], span: tuple[int, int], topic_key: str) -> bool:
     return f"topic_key: {_yaml_str(topic_key)}" in lines[span[0]:span[1]]
 
@@ -204,7 +217,14 @@ def patch(text: str, *, topic_key: str, related: list[str]) -> str | None:
     hits = [i for i in range(start, end) if lines[i].startswith("related:")]
     if len(hits) != 1:
         return None
-    lines[hits[0]] = f"related: {_yaml_list(related)}"
+    # UNION, not replace. Computed tag-overlap links are one source of links on
+    # a page; a link a person put there, or a migration added to connect this
+    # page to a hand-written one, is another, and this function has no way to
+    # tell them apart. Replacing would silently delete every link it did not
+    # itself derive -- on a page whose whole purpose is to be connected.
+    existing = _parse_links(lines[hits[0]].split(": ", 1)[1] if ": " in lines[hits[0]] else "")
+    merged = list(existing) + [link for link in related if link not in existing]
+    lines[hits[0]] = f"related: {_yaml_list(merged)}"
     return "\n".join(lines)
 
 
